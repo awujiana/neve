@@ -2,16 +2,18 @@
 
 [![协议](https://img.shields.io/badge/协议-AGPL--3.0-blue)](LICENSE)
 [![语言](https://img.shields.io/badge/语言-Rust-orange?logo=rust&logoColor=white)](https://www.rust-lang.org)
-[![平台](https://img.shields.io/badge/平台-Windows-blue)](https://github.com/awujian/neve)
-[![作者](https://img.shields.io/badge/作者-awujian-orange)](https://github.com/awujian)
-[![状态](https://img.shields.io/badge/状态-骨架开发中-green)](https://github.com/awujian/neve)
-[![AI 辅助生成](https://img.shields.io/badge/AI辅助生成-是-orange)](https://github.com/awujian/neve)
+[![平台](https://img.shields.io/badge/平台-Windows-blue)](https://github.com/awujiana/neve)
+[![作者](https://img.shields.io/badge/作者-awujian-orange)](https://github.com/awujiana)
+[![状态](https://img.shields.io/badge/状态-骨架开发中-green)](https://github.com/awujiana/neve)
+[![AI 辅助生成](https://img.shields.io/badge/AI辅助生成-是-orange)](https://github.com/awujiana/neve)
 
 <h1>Névé 粒雪</h1>
 
 <strong>PCL2 式 MPV 内核播放器管理器 —— 检测、安装、脚本、配置，一站式管理所有使用 MPV 内核的播放器</strong>
 
 简体中文 | [English](./README_EN.md)（待补充）
+
+> 本仓库当前为**私有仓库**，待完成可使用的版本后转为公开。
 
 </div>
 
@@ -85,7 +87,7 @@
 <details>
 <summary><strong>方式一：从 Releases 下载（规划中）</strong></summary>
 
-前往 [Releases](https://github.com/awujian/neve/releases) 下载对应平台的产物并解压。当前项目处于骨架开发阶段，尚未发布正式版本。
+前往 [Releases](https://github.com/awujiana/neve/releases) 下载对应平台的产物并解压。当前项目处于骨架开发阶段，尚未发布正式版本。
 
 </details>
 
@@ -130,13 +132,13 @@ cargo test
 
 ## 🔗 关联仓库
 
-- [awujian/neve](https://github.com/awujian/neve) — 本仓库
+- [awujiana/neve](https://github.com/awujiana/neve) — 本仓库（当前私有，待可用版本后公开）
 - [mpv-Bingshan](../mpv-Bingshan) — MPV 整合包制作仓库，粒雪负责其包的安装与管理
 
 ## 📮 作者联系方式
 
 - **作者**：awujian
-- **GitHub**：[@awujian](https://github.com/awujian)
+- **GitHub**：[@awujiana](https://github.com/awujiana)
 - **邮箱**：待补充（暂请通过 GitHub Issue 联系）
 
 ## 📄 开源协议
