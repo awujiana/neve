@@ -44,7 +44,7 @@ cargo run --release
 
 ## 模块规划
 
-- [ ] `core::players` — MPV 内核播放器检测（扫描注册表/常见路径）、多版本安装切换、进程管理
+- [x] `core::players` — MPV 内核播放器检测（常见路径 / 注册表卸载键 / PATH 三路扫描 + 去重、便携配置目录识别、惰性版本探测）
 - [ ] `core::packages` — 播放器包安装/更新（mpv-Bingshan 包、shinchiro/zhongfly build 源）
 - [ ] `core::scripts` — lua 脚本（uosc 系）安装 / 启停 / 更新 / 依赖脚本扫描
 - [ ] `core::config` — mpv.conf / input.conf / 脚本 conf 解析、可视化编辑、备份回滚
