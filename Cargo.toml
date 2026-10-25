@@ -1,0 +1,17 @@
+[package]
+name = "neve"
+version = "0.1.0"
+edition = "2024"
+description = "Névé — PCL2 式 MPV 播放器与脚本管理器（纯 Rust + GPUI）"
+license = "MIT"
+
+[dependencies]
+# GPUI：Zed 的 GPU 加速原生 UI 框架（crates.io 最新 0.2.2，支持 Windows）
+gpui = "0.2"
+
+# 可选：GPUI 配套组件库（按钮/列表/侧栏/输入框等 60+ 桌面组件）
+# 需要时取消注释：gpui-component = "0.8"
+
+[profile.release]
+lto = "thin"
+strip = true
