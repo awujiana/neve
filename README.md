@@ -1,7 +1,21 @@
 # Névé（粒雪）
 
-> 冰川之源 —— PCL2 式 **MPV 播放器 / 播放器脚本管理器**
+> 冰川之源 —— PCL2 式 **MPV 内核播放器管理器**
 > 纯 Rust + GPUI 原生 GPU 渲染
+
+## 定位
+
+面向**所有使用 MPV 内核的播放器**（mpv、mpv.net、Celluloid、IINA 等及其衍生整合包）的统一管理器：
+
+- **播放器管理**：检测本机所有 MPV 内核播放器，安装 / 切换 / 更新播放器包（含 `../mpv-Bingshan` 产出的整合包）
+- **脚本管理**：MPV 脚本（lua 脚本、uosc 系）的安装 / 启停 / 更新 / 依赖扫描
+- **一键配置**：
+  - 视频文件关联注册（右键"打开方式"/默认程序）
+  - input.conf 按键配置（可视化编辑、冲突检测）
+  - mpv.conf 配置（分类项编辑、备份回滚）
+  - 脚本 conf 配置（各脚本的 conf 文件统一入口编辑）
+
+交互体验对标 PCL2：清爽的侧栏导航、动画流畅、开箱即用。
 
 ## 技术栈
 
@@ -30,12 +44,14 @@ cargo run --release
 
 ## 模块规划
 
-- [ ] `core::mpv` — mpv 检测 / 多版本安装切换 / 进程管理
-- [ ] `core::scripts` — lua 脚本（uosc 系）安装 / 启停 / 依赖脚本扫描
-- [ ] `core::config` — mpv.conf / input.conf 解析、可视化编辑、备份回滚
-- [ ] `ui` — 主界面：侧栏导航 + 脚本列表 + 配置编辑器
-- [ ] `update` — 自更新与 mpv 版本源（shinchiro/zhongfly build）检查
+- [ ] `core::players` — MPV 内核播放器检测（扫描注册表/常见路径）、多版本安装切换、进程管理
+- [ ] `core::packages` — 播放器包安装/更新（mpv-Bingshan 包、shinchiro/zhongfly build 源）
+- [ ] `core::scripts` — lua 脚本（uosc 系）安装 / 启停 / 更新 / 依赖脚本扫描
+- [ ] `core::config` — mpv.conf / input.conf / 脚本 conf 解析、可视化编辑、备份回滚
+- [ ] `core::assoc` — 视频文件关联注册（Windows 注册表 / 默认程序）
+- [ ] `ui` — 主界面：侧栏导航 + 播放器列表 + 脚本管理 + 配置编辑器
+- [ ] `update` — 自更新与播放器版本源检查
 
 ## 同级项目
 
-- `../mpv-Bingshan` —— 另一条技术线（Tauri 2 / Rust + TS）的同类管理器，二者共享需求规划
+- `../mpv-Bingshan` —— MPV 整合包制作仓库（包体打包/分发），Neve 负责其包的安装与管理
