@@ -1,6 +1,10 @@
 # Rust 构建产物
 /target/
 
+# 样式参考 README 与 AI 工作目录（不入库）
+样式readme/
+.workbuddy-ai/
+
 # IDE
 .idea/
 .vscode/
