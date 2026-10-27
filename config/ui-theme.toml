@@ -1,0 +1,61 @@
+# Névé UI theme tokens — planning baseline only; not loaded by the current app.
+# Runtime preferences belong in <data_dir>/settings.json.
+schema_version = 1
+default_mode = "system" # system | light | dark
+default_glass_strength = "standard" # soft | standard | clear
+default_motion = "system" # system | full | reduced
+
+[light]
+background = "#EAF2F7"
+background_secondary = "#F5F9FC"
+surface = "#F8FBFD"
+surface_glass = "#F8FBFDE6"
+surface_hover = "#E3EEF5"
+text_primary = "#172B3A"
+text_secondary = "#526879"
+border = "#B9CCD9"
+accent = "#347DA5"
+accent_hover = "#28688E"
+focus = "#1D6F9E"
+success = "#287A59"
+warning = "#946300"
+error = "#B43D45"
+toggle_track = "#3D7EAE"
+toggle_sun = "#ECCA2F"
+toggle_cloud_front = "#F3FDFF"
+toggle_cloud_back = "#AACADF"
+
+[dark]
+background = "#111923"
+background_secondary = "#172330"
+surface = "#1C2A38"
+surface_glass = "#1C2A38E6"
+surface_hover = "#26394A"
+text_primary = "#E6F0F6"
+text_secondary = "#A8BBC9"
+border = "#405566"
+accent = "#83C5EA"
+accent_hover = "#A2D8F4"
+focus = "#A2D8F4"
+success = "#82D2A8"
+warning = "#F1C66F"
+error = "#FF9B9B"
+toggle_track = "#1D1F2C"
+toggle_moon = "#C4C9D1"
+toggle_crater = "#959DB1"
+toggle_star = "#FFFFFF"
+
+[glass]
+blur_radius = 18 # design target in logical pixels; validate in GPUI before adopting
+border_opacity = 0.42
+highlight_opacity = 0.58
+shadow_color = "#07111A"
+shadow_opacity = 0.16
+opaque_fallback_light = "#F5F9FC"
+opaque_fallback_dark = "#1C2A38"
+
+[motion]
+theme_transition_ms = 280
+hover_transition_ms = 140
+panel_transition_ms = 190
+reduced_motion_transition_ms = 0
