@@ -5,3 +5,4 @@ pub mod config;
 pub mod players;
 pub mod scripts;
 pub mod store;
+pub mod sync;
