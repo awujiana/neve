@@ -6,11 +6,11 @@
 
 mod core;
 
-use core::players::{detect_players, DetectedPlayer};
+use core::players::{DetectedPlayer, detect_players};
 
 use gpui::{
-    div, prelude::*, px, rgb, size, App, Application, Bounds, Context, Render, Window,
-    WindowBounds, WindowOptions,
+    App, Application, Bounds, Context, Render, Window, WindowBounds, WindowOptions, div,
+    prelude::*, px, rgb, size,
 };
 
 const BG: u32 = 0x14181d;
@@ -34,17 +34,18 @@ impl Render for PlayersPage {
                     .as_ref()
                     .map(|c| c.display().to_string())
                     .unwrap_or_else(|| "未找到配置目录".into());
+                let portable_label = if p.is_portable() { " (便携版)" } else { "" };
                 div()
                     .py_1p5()
                     .text_sm()
                     .text_color(rgb(FG))
-                    .child(format!("▸ {}", p.name))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(FG_DIM))
-                            .child(format!("   {:?} | {} | {}", p.kind, version, p.exe_path.display())),
-                    )
+                    .child(format!("▸ {}{}", p.name, portable_label))
+                    .child(div().text_xs().text_color(rgb(FG_DIM)).child(format!(
+                        "   {:?} | {} | {}",
+                        p.kind,
+                        version,
+                        p.exe_path.display()
+                    )))
                     .child(
                         div()
                             .text_xs()
@@ -81,18 +82,24 @@ fn main() {
     // TODO: 移入后台线程；当前骨架阶段同步执行（目录扫描深度受限，通常 < 1s）
     let players = detect_players();
     for p in &players {
-        eprintln!("[detect] {} ({:?}) -> {}", p.name, p.kind, p.exe_path.display());
+        eprintln!(
+            "[detect] {} ({:?}) -> {}",
+            p.name,
+            p.kind,
+            p.exe_path.display()
+        );
     }
 
     Application::new().run(move |cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(860.0), px(560.0)), cx);
-        cx.open_window(
+        if let Err(error) = cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 ..Default::default()
             },
             |_, cx| cx.new(|_| PlayersPage { players }),
-        )
-        .unwrap();
+        ) {
+            eprintln!("无法打开 Névé 主窗口：{error}");
+        }
     });
 }

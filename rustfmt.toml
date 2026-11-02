@@ -1,0 +1,10 @@
+# Névé Rust style baseline. Keep this file compatible with stable rustfmt.
+edition = "2024"
+style_edition = "2024"
+max_width = 100
+tab_spaces = 4
+hard_tabs = false
+newline_style = "Unix"
+use_small_heuristics = "Default"
+reorder_imports = true
+reorder_modules = true

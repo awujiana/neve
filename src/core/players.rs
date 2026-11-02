@@ -79,8 +79,11 @@ pub fn detect_players() -> Vec<DetectedPlayer> {
     let mut found: Vec<DetectedPlayer> = Vec::new();
     let mut seen: BTreeSet<PathBuf> = BTreeSet::new();
 
-    let mut push = |p: DetectedPlayer, seen: &mut BTreeSet<PathBuf>, out: &mut Vec<DetectedPlayer>| {
-        let key = p.exe_path.canonicalize().unwrap_or_else(|_| p.exe_path.clone());
+    let push = |p: DetectedPlayer, seen: &mut BTreeSet<PathBuf>, out: &mut Vec<DetectedPlayer>| {
+        let key = p
+            .exe_path
+            .canonicalize()
+            .unwrap_or_else(|_| p.exe_path.clone());
         if seen.insert(key) {
             out.push(p);
         }
@@ -103,7 +106,11 @@ pub fn detect_players() -> Vec<DetectedPlayer> {
         }
     }
 
-    found.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.exe_path.cmp(&b.exe_path)));
+    found.sort_by(|a, b| {
+        a.name
+            .cmp(&b.name)
+            .then_with(|| a.exe_path.cmp(&b.exe_path))
+    });
     found
 }
 
@@ -114,7 +121,11 @@ pub fn detect_players() -> Vec<DetectedPlayer> {
 /// 候选根目录：系统安装位置 + 便携位置 + 当前工作区
 fn candidate_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
-    let mut push_root = |p: PathBuf| if p.is_dir() { roots.push(p) };
+    let mut push_root = |p: PathBuf| {
+        if p.is_dir() {
+            roots.push(p)
+        }
+    };
 
     if let Some(pf) = std::env::var_os("ProgramFiles") {
         push_root(PathBuf::from(pf));
@@ -155,16 +166,18 @@ fn scan_dir_recursive(dir: &Path, depth: u8, out: &mut Vec<DetectedPlayer>) {
     // 目录名命中整合包提示时，先看包内 mpv.exe
     if let Some(dirname) = dir.file_name().and_then(|n| n.to_str()) {
         let dl = dirname.to_lowercase();
-        if PACKAGE_DIR_HINTS.iter().any(|h| dl.contains(h)) {
-            if let Some(p) = try_known_exe(dir) {
-                out.push(p);
-            }
+        if PACKAGE_DIR_HINTS.iter().any(|h| dl.contains(h))
+            && let Some(p) = try_known_exe(dir)
+        {
+            out.push(p);
         }
     }
     if let Some(p) = try_known_exe(dir) {
         out.push(p);
     }
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         // 跳过明显的系统/缓存目录
@@ -210,30 +223,44 @@ fn try_known_exe(dir: &Path) -> Option<DetectedPlayer> {
 
 #[cfg(windows)]
 fn scan_registry() -> Vec<DetectedPlayer> {
-    use winreg::enums::*;
     use winreg::RegKey;
+    use winreg::enums::*;
 
     const UNINSTALL_KEYS: &[&str] = &[
         r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
         r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
     ];
-    const HIVES: &[isize] = &[HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER];
+    const HIVES: &[winreg::HKEY] = &[
+        HKEY_LOCAL_MACHINE as winreg::HKEY,
+        HKEY_CURRENT_USER as winreg::HKEY,
+    ];
 
     let mut out = Vec::new();
     for hive in HIVES {
         for key_path in UNINSTALL_KEYS {
-            let Ok(hive_key) = RegKey::predef(*hive).open_subkey_with_flags(key_path, KEY_READ) else {
+            let Ok(hive_key) = RegKey::predef(*hive).open_subkey_with_flags(key_path, KEY_READ)
+            else {
                 continue;
             };
             for sub in hive_key.enum_keys().flatten() {
-                let Ok(item) = hive_key.open_subkey_with_flags(&sub, KEY_READ) else { continue };
+                let Ok(item) = hive_key.open_subkey_with_flags(&sub, KEY_READ) else {
+                    continue;
+                };
                 let display_name: Option<String> = item.get_value("DisplayName").ok();
-                let Some(display_name) = display_name else { continue };
+                let Some(display_name) = display_name else {
+                    continue;
+                };
                 let dl = display_name.to_lowercase();
-                if !dl.contains("mpv") && !dl.contains("celluloid") && !dl.contains("iina") && !dl.contains("bingshan") {
+                if !dl.contains("mpv")
+                    && !dl.contains("celluloid")
+                    && !dl.contains("iina")
+                    && !dl.contains("bingshan")
+                {
                     continue;
                 }
-                let Some(exe_path) = display_icon_to_exe(&item) else { continue };
+                let Some(exe_path) = display_icon_to_exe(&item) else {
+                    continue;
+                };
                 if !exe_path.is_file() {
                     continue;
                 }
@@ -282,13 +309,18 @@ fn display_icon_to_exe(item: &winreg::RegKey) -> Option<PathBuf> {
 // ---------------------------------------------------------------------------
 
 fn scan_path_env() -> Vec<DetectedPlayer> {
-    let Some(path_var) = std::env::var_os("PATH") else { return Vec::new() };
+    let Some(path_var) = std::env::var_os("PATH") else {
+        return Vec::new();
+    };
     let mut out = Vec::new();
     for dir in std::env::split_paths(&path_var) {
-        if let Some(p) = try_known_exe(&dir) {
-            if p.source == DetectSource::CommonPath {
-                out.push(DetectedPlayer { source: DetectSource::PathEnv, ..p });
-            }
+        if let Some(p) = try_known_exe(&dir)
+            && p.source == DetectSource::CommonPath
+        {
+            out.push(DetectedPlayer {
+                source: DetectSource::PathEnv,
+                ..p
+            });
         }
     }
     out
@@ -315,10 +347,7 @@ fn classify(exe_path: &Path, display_name: &str) -> PlayerKind {
 /// 查找配置目录：便携 portable_config → %APPDATA%\mpv(.net) → exe 旁 config
 fn find_config_dir(exe_path: &Path) -> Option<PathBuf> {
     let exe_dir = exe_path.parent()?;
-    let candidates = [
-        exe_dir.join("portable_config"),
-        exe_dir.join("config"),
-    ];
+    let candidates = [exe_dir.join("portable_config"), exe_dir.join("config")];
     for c in candidates {
         if c.is_dir() {
             return Some(c);
@@ -336,12 +365,14 @@ fn find_config_dir(exe_path: &Path) -> Option<PathBuf> {
 }
 
 /// 惰性版本探测：运行 `exe --version` 并解析首行（阻塞操作，勿在 UI 线程批量调用）
+#[expect(dead_code, reason = "供播放器详情页按需探测版本使用")]
 pub fn probe_version(exe_path: &Path) -> Option<String> {
     let output = Command::new(exe_path).arg("--version").output().ok()?;
     if !output.status.success() {
         return None;
     }
-    let first = String::from_utf8_lossy(&output.stdout).lines().next()?.trim();
+    let output_text = String::from_utf8_lossy(&output.stdout);
+    let first = output_text.lines().next()?.trim();
     (!first.is_empty()).then(|| first.to_string())
 }
 
@@ -352,7 +383,10 @@ mod tests {
     #[test]
     fn classify_by_filename() {
         assert_eq!(classify(Path::new("C:/x/mpv.exe"), "x"), PlayerKind::Mpv);
-        assert_eq!(classify(Path::new("C:/x/other.exe"), "Some Pack"), PlayerKind::UnknownMpvKernel("Some Pack".into()));
+        assert_eq!(
+            classify(Path::new("C:/x/other.exe"), "Some Pack"),
+            PlayerKind::UnknownMpvKernel("Some Pack".into())
+        );
     }
 
     #[test]
