@@ -86,7 +86,6 @@ impl ConfDoc {
     }
 
     /// 读取键的当前生效值（mpv 语义：最后一次出现生效）
-    #[allow(dead_code)] // TODO(M2-UI): 配置编辑器 UI 接入后移除此属性
     pub fn get(&self, key: &str) -> Option<String> {
         self.lines.iter().rev().find_map(|line| match line {
             ConfLine::Entry {
