@@ -1,11 +1,15 @@
 //! Névé —— PCL2 式 MPV 内核播放器管理器
 //! 纯 Rust + GPUI 原生渲染
 //!
-//! 当前：启动时执行 core::players 播放器检测，并在窗口中列出结果。
-//! TODO：检测移入后台线程，避免阻塞启动（GPUI 支持 spawn/背景任务）。
+//! 当前：启动时执行 core::players 播放器检测 + core::config 配置冲突诊断（FR-11），
+//! 并在窗口中列出结果。
+//! TODO：检测与冲突扫描移入后台线程，避免阻塞启动（GPUI 支持 spawn/背景任务）。
 
 mod core;
 
+use core::config::conf::ConfDoc;
+use core::config::conflicts::{detect_input_conflicts, detect_value_conflicts};
+use core::config::input::InputDoc;
 use core::players::{DetectedPlayer, detect_players};
 
 use gpui::{
@@ -89,6 +93,7 @@ fn main() {
             p.exe_path.display()
         );
     }
+    log_config_diagnostics(&players);
 
     Application::new().run(move |cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(860.0), px(560.0)), cx);
@@ -102,4 +107,55 @@ fn main() {
             eprintln!("无法打开 Névé 主窗口：{error}");
         }
     });
+}
+
+/// 启动诊断：扫描各播放器配置目录的 input.conf / mpv.conf，
+/// 输出按键冲突与配置值冲突（FR-11 核心链路的最小接入）。
+/// TODO: 结果改为结构化返回，由 UI 冲突面板展示。
+fn log_config_diagnostics(players: &[DetectedPlayer]) {
+    for player in players {
+        let Some(config_dir) = &player.config_dir else {
+            continue;
+        };
+
+        let input_path = config_dir.join("input.conf");
+        if let Ok(text) = std::fs::read_to_string(&input_path) {
+            let doc = InputDoc::parse(&text);
+            if doc.render() != text {
+                eprintln!(
+                    "[config] 警告：input.conf 渲染与原文存在差异（{}）",
+                    input_path.display()
+                );
+            }
+            for conflict in detect_input_conflicts(&[("input.conf", &doc)]) {
+                let effective = &conflict.bindings[conflict.effective_index];
+                eprintln!(
+                    "[config] 按键冲突 {}：{} 处绑定，生效命令 \"{}\"（行 {}）",
+                    conflict.key,
+                    conflict.bindings.len(),
+                    effective.command,
+                    effective.line_no
+                );
+            }
+        }
+
+        let mpv_conf_path = config_dir.join("mpv.conf");
+        if let Ok(text) = std::fs::read_to_string(&mpv_conf_path) {
+            let doc = ConfDoc::parse(&text);
+            if doc.render() != text {
+                eprintln!(
+                    "[config] 警告：mpv.conf 渲染与原文存在差异（{}）",
+                    mpv_conf_path.display()
+                );
+            }
+            for conflict in detect_value_conflicts(&[("mpv.conf", &doc)]) {
+                eprintln!(
+                    "[config] 配置冲突 {}：{} 处定义，生效值 \"{}\"",
+                    conflict.key,
+                    conflict.values.len(),
+                    conflict.effective
+                );
+            }
+        }
+    }
 }
