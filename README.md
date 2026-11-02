@@ -1,17 +1,30 @@
+<!-- badges:start -->
+<p align="center">
+  <a href="LICENSE"><img alt="协议 AGPL-3.0" src="https://img.shields.io/badge/%E5%8D%8F%E8%AE%AE-AGPL--3.0-blue?style=flat"></a>
+  <a href="https://github.com/awujiana/neve"><img alt="平台 Windows" src="https://img.shields.io/badge/%E5%B9%B3%E5%8F%B0-Windows-black?style=flat&logo=windows&logoColor=white"></a>
+  <a href="https://github.com/awujiana"><img alt="作者 awujiana" src="https://img.shields.io/badge/%E4%BD%9C%E8%80%85-awujiana-orange?style=flat"></a>
+  <a href="https://github.com/awujiana/neve"><img alt="状态 骨架开发中" src="https://img.shields.io/badge/%E7%8A%B6%E6%80%81-%E9%AA%A8%E6%9E%B6%E5%BC%80%E5%8F%91%E4%B8%AD-green?style=flat"></a>
+  <a href="https://github.com/awujiana/neve"><img alt="AI辅助生成 是" src="https://img.shields.io/badge/AI%E8%BE%85%E5%8A%A9%E7%94%9F%E6%88%90-%E6%98%AF-orange?style=flat"></a>
+</p>
+<!-- badges:end -->
+
 <div align="center">
 
-[![协议](https://img.shields.io/badge/协议-AGPL--3.0-blue)](LICENSE)
-[![语言](https://img.shields.io/badge/语言-Rust-orange?logo=rust&logoColor=white)](https://www.rust-lang.org)
-[![平台](https://img.shields.io/badge/平台-Windows-blue)](https://github.com/awujiana/neve)
-[![作者](https://img.shields.io/badge/作者-awujian-orange)](https://github.com/awujiana)
-[![状态](https://img.shields.io/badge/状态-骨架开发中-green)](https://github.com/awujiana/neve)
-[![AI 辅助生成](https://img.shields.io/badge/AI辅助生成-是-orange)](https://github.com/awujiana/neve)
-
 <h1>Névé 粒雪</h1>
+<h2>neve</h2>
 
 <strong>PCL2 式 MPV 内核播放器管理器 —— 检测、安装、脚本、配置，一站式管理所有使用 MPV 内核的播放器</strong>
 
-简体中文 | [English](./README_EN.md)（待补充）
+<!-- language-nav:start -->
+<p align="center">
+  <a href="README.md"><img alt="简体中文 当前" src="https://img.shields.io/badge/%E7%AE%80%E4%BD%93%E4%B8%AD%E6%96%87-%E5%BD%93%E5%89%8D-2ea44f?style=flat"></a>
+  <img alt="English 待补" src="https://img.shields.io/badge/English-%E5%BE%85%E8%A1%A5-lightgrey?style=flat">
+</p>
+
+<p align="center">
+  <sub>文档 / Docs：<a href="docs/设计文档.md">文档索引</a> · <a href="CONTRIBUTING.md">贡献指南</a> · <a href="CHANGELOG.md">更新日志</a> · <a href="#多语言支持">多语言支持</a></sub>
+</p>
+<!-- language-nav:end -->
 
 > 本仓库当前为**私有仓库**，待完成可使用的版本后转为公开。
 
@@ -29,6 +42,7 @@
 - [展示图](#-展示图)
 - [快速开始](#-快速开始)
 - [文档](#-文档)
+- [多语言支持](#-多语言支持)
 - [注意事项](#-注意事项)
 - [反馈建议](#-反馈建议)
 - [关联仓库](#-关联仓库)
@@ -72,15 +86,32 @@
 
 ## 📷 展示图
 
-### 项目展示图
+> 界面为**液态玻璃**风格：半透明面板浮在渐变底色与柔光之上，靠内高光边、柔和投影与材质层次营造通透感。GPUI 不提供背景模糊，因此以「半透明填充 + 斜向渐变 + 内高光 + 多层衰减光斑」逼近该质感。深浅两套主题共用同一套设计令牌。
 
-![项目展示图](assets/showcase.svg)
+<table align="center">
+  <tr>
+    <td align="center" width="50%">
+      <img src="docs/screenshots/overview-dark.png" alt="概览页（深色）" width="100%">
+      <br><sub><b>概览页</b> · 深色</sub>
+    </td>
+    <td align="center" width="50%">
+      <img src="docs/screenshots/overview-light.png" alt="概览页（浅色）" width="100%">
+      <br><sub><b>概览页</b> · 浅色</sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="50%">
+      <img src="docs/screenshots/players-dark.png" alt="播放器页（深色）" width="100%">
+      <br><sub><b>播放器页</b> · 深色</sub>
+    </td>
+    <td align="center" width="50%">
+      <img src="docs/screenshots/players-light.png" alt="播放器页（浅色）" width="100%">
+      <br><sub><b>播放器页</b> · 浅色</sub>
+    </td>
+  </tr>
+</table>
 
-### UI 示例图（界面预览）
-
-![界面主截图](assets/ui-example.svg)
-
-> 当前为占位图，真实截图将在首个可用版本发布时替换（建议 16:9 / 16:10，宽度 ≥ 1200px）。
+> 截图为当前开发版本实拍，随界面迭代可能变化。
 
 ## 📦 快速开始
 
@@ -113,9 +144,17 @@ cargo test
 
 - [设计文档（PRD）](docs/设计文档.md) —— 需求、用户故事、验收标准、里程碑
 - [架构文档](docs/架构文档.md) —— 分层架构、模块划分、数据存储、关键流程、风险
-- [UI 设计规范](docs/UI设计规范.md) —— 页面结构、液态玻璃视觉语言、昼夜主题切换与交互原则
+- [UI 设计规范](docs/UI设计规范.md) —— 页面结构、视觉语言、昼夜主题切换与交互原则
 - [Rust 代码风格与质量门禁](docs/Rust代码风格与质量门禁.md) —— 强制格式、API 设计、所有权习惯与 CI 合并门禁
-- [主题令牌配置](config/ui-theme.toml) —— 主题色、玻璃表面、动效与无障碍基线（设计参考，尚未接入运行时）
+- [主题令牌配置](config/ui-theme.toml) —— 主题色、玻璃表面、动效与无障碍基线（已投影到运行时语义色）
+
+> 测试见 `src/**/*.rs` 内的 `mod tests`，默认不单独成文。
+
+## 🌐 多语言支持
+
+- 当前提供 **简体中文**（`README.md`）。
+- English（`README.en.md`）尚未提供，补齐后顶部语言徽章会自动从「待补」变为可切换。
+- 界面语言（中/英文）规划见设计文档 FR-09，随 M4 接入。
 
 ## ⚠️ 注意事项
 

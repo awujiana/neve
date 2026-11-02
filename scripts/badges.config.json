@@ -1,0 +1,24 @@
+{
+  "owner": "awujiana",
+  "repo": "neve",
+  "project": "Névé 粒雪",
+  "license": "AGPL-3.0",
+  "readme": "README.md",
+  "badge_style": "flat",
+  "platform": "Windows",
+  "platform_logo": "windows",
+  "platform_logo_color": "white",
+  "status": "骨架开发中",
+  "ai_assisted": true,
+  "ai_message": "是",
+  "languages": [
+    { "name": "简体中文", "file": "README.md", "current": true },
+    { "name": "English", "file": "README.en.md" }
+  ],
+  "docs": [
+    { "label": "文档索引", "href": "docs/设计文档.md" },
+    { "label": "贡献指南", "href": "CONTRIBUTING.md" },
+    { "label": "更新日志", "href": "CHANGELOG.md" },
+    { "label": "多语言支持", "href": "#多语言支持" }
+  ]
+}

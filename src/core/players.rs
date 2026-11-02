@@ -28,6 +28,26 @@ pub enum PlayerKind {
     UnknownMpvKernel(String),
 }
 
+impl PlayerKind {
+    /// 面向用户的类型名。界面不直接显示 `Debug` 输出，避免出现 `Mpv`、`UnknownMpvKernel("x")` 这类内部写法。
+    pub fn display_name(&self) -> String {
+        match self {
+            PlayerKind::Mpv => "mpv".to_string(),
+            PlayerKind::MpvNet => "mpv.net".to_string(),
+            PlayerKind::Celluloid => "Celluloid".to_string(),
+            PlayerKind::Iina => "IINA".to_string(),
+            PlayerKind::Bingshan => "青山整合包".to_string(),
+            PlayerKind::UnknownMpvKernel(name) => {
+                if name.trim().is_empty() {
+                    "未知内核".to_string()
+                } else {
+                    name.clone()
+                }
+            }
+        }
+    }
+}
+
 /// 探测来源
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DetectSource {
