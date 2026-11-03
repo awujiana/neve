@@ -93,19 +93,24 @@ fn lerp(from: f32, to: f32, ratio: f32) -> f32 {
 /// 不会出现「跨过某个点突然换主题」的跳变。
 pub fn palette(ratio: f32) -> Palette {
     Palette {
-        background: mix(0x25252b, 0xf2f2f4, ratio),
-        background_secondary: mix(0x1c1c21, 0xfbfbfc, ratio),
-        surface: mix(0x1b1b1f, 0xffffff, ratio),
-        surface_hover: mix(0x26262b, 0xe8e8ec, ratio),
+        // 亮端整体带一点冷调（蓝灰），这是浅色玻璃的读感来源；
+        // 纯中性灰会显得像塑料，不像玻璃。
+        background: mix(0x25252b, 0xf1f3f7, ratio),
+        background_secondary: mix(0x1c1c21, 0xf9fafd, ratio),
+        surface: mix(0x1b1b1f, 0xfbfcfe, ratio),
+        surface_hover: mix(0x26262b, 0xe7ebf2, ratio),
         text_primary: mix(0xf2f2f5, 0x1a1a1c, ratio),
-        // 次级文字要更亮：玻璃底下会透出任意颜色的桌面，中性灰压得太暗就读不出来了。
-        text_secondary: mix(0xb8b8c0, 0x55555c, ratio),
-        border: mix(0x666667, 0xb4b4ba, ratio),
+        // 次级文字两端都要「贴着底线」取值：暗底上要够亮，亮底上要够深。
+        // 尤其亮端——面板是半透的，深色壁纸会把面板拉灰，
+        // 若次级文字只取中灰（如 0x7a7a80），落在灰面板上就只剩 3:1 上下的对比度。
+        text_secondary: mix(0xb8b8c0, 0x3d434e, ratio),
+        border: mix(0x666667, 0xa9b0bd, ratio),
         // 强调色随明暗翻转：暗底用白，亮底用近黑。
         accent: mix(0xf2f2f5, 0x1a1a1c, ratio),
         accent_hover: mix(0xffffff, 0x33333a, ratio),
         success: mix(0x8fbf4a, 0x3f7a2e, ratio),
-        warning: mix(0xe0b46a, 0x8a6100, ratio),
+        // 警告色亮端压到近棕：浅色玻璃上橙黄太跳且压不住白底。
+        warning: mix(0xe0b46a, 0x6f4e00, ratio),
         danger: mix(0xe0776f, 0xb4393b, ratio),
         on_accent: mix(0x0c0c0e, 0xffffff, ratio),
     }
@@ -120,16 +125,17 @@ pub struct Glass {
     pub background_end: u32,
     /// 背景层整体不透明度：小于 1 时桌面/亚克力会透出来。
     pub background_alpha: f32,
-    /// 背景装饰光斑色。
-    pub glow: Hsla,
     /// 卡片等主工作层表面，半透明。
     pub surface: Hsla,
     /// 侧栏 / 标题栏等常驻容器。
     pub surface_strong: Hsla,
     /// 菜单、弹层等浮层：玻璃的「实体形态」，接近不透明，保证文字可读。
     pub overlay: Hsla,
-    /// 发丝高光边。
+    /// 发丝高光边（内侧那道亮线）。
     pub highlight: Hsla,
+    /// 外缘描边：暗底用亮线勾边，亮底反过来用一道极淡的暗线，
+    /// 否则近白的面板在近白的背景上会连边界都看不出来。
+    pub outline: Hsla,
     /// 柔和投影色。
     pub shadow: Hsla,
 }
@@ -152,27 +158,32 @@ fn surface_alpha(material: Material) -> f32 {
 /// 免得文字直接贴在桌面上辨认不出。
 pub fn glass(appearance: &Appearance) -> Glass {
     let ratio = appearance.lightness_ratio();
-    let alpha = appearance.background_alpha();
+    // 亮底下文字是深色的，而窗口后面可能是任意颜色（深色壁纸最常见，纯黑也不少）。
+    // 底色若太透，深字就会贴在深色壁纸上读不出来，所以亮端给底色一个不透明度下限。
+    // 0.78 是量出来的：纯黑桌面上，底色不透明度要到 ≈0.70 才能把窗口底抬到 ≈175/255，
+    // 让压在底色上的正文刚好压住 WCAG AA 的 4.5:1（0.72 时只有 4.05:1）。
+    // 下限只随明暗上升，深色端仍是 0.20——想要极透就把明暗拉到暗端，互不影响。
+    let alpha = appearance.background_alpha().max(lerp(0.20, 0.78, ratio));
     // 面板比窗口底色实一些：底色越透，文字越需要一个稳定的底，
     // 所以面板只用一半的幅度跟随滑杆，剩下的当作可读性的地板。
     let scale = 0.45 + 0.55 * alpha;
     let material_alpha = surface_alpha(appearance.material);
-    let panel_alpha = (material_alpha * scale).clamp(0.10, 1.);
-    let strong_alpha = ((material_alpha + 0.20) * scale).clamp(0.14, 1.);
+    // 浅色玻璃要靠面板自己「发白」：底色是半透的，后面是什么颜色就透什么颜色，
+    // 若面板也跟着半透，落在深色壁纸上就整体发灰，读起来仍是深色主题。
+    // 所以明暗越亮，面板的填充越实——透明度让给窗口底色，面板负责把界面「提亮」。
+    let light_boost = lerp(1.0, 2.0, ratio);
+    let panel_alpha = (material_alpha * scale * light_boost).clamp(0.10, 0.92);
+    let strong_alpha = ((material_alpha + 0.20) * scale * light_boost).clamp(0.14, 0.95);
     // 浮层是玻璃的实体形态：不随滑杆变虚，否则菜单文字会浮在桌面上读不清。
     let overlay_alpha = (strong_alpha + 0.34).min(0.97);
     // 卡片色调：暗底用黑压暗，亮底用白提亮，中间过渡成中性灰。
     let (tint_lightness, strong_lightness) = if ratio < 0.5 { (0.0, 0.0) } else { (1.0, 1.0) };
     Glass {
-        background_start: mix(0x25252b, 0xf6f6f8, ratio),
-        background_end: mix(0x151518, 0xdcdce2, ratio),
+        // 亮端渐变取到纯白：底色是半透的，合成值 ≈ alpha × 渐变色，
+        // 渐变越接近白，同样透明度下窗口底就能抬得越亮，深字才压得住对比度。
+        background_start: mix(0x25252b, 0xffffff, ratio),
+        background_end: mix(0x151518, 0xeaf0f8, ratio),
         background_alpha: alpha,
-        glow: Hsla {
-            h: 0.0,
-            s: 0.0,
-            l: 1.0,
-            a: lerp(0.06, 0.55, ratio),
-        },
         surface: Hsla {
             h: 0.0,
             s: 0.0,
@@ -195,13 +206,28 @@ pub fn glass(appearance: &Appearance) -> Glass {
             h: 0.0,
             s: 0.0,
             l: 1.0,
-            a: lerp(0.20, 0.95, ratio),
+            a: lerp(0.20, 0.98, ratio),
+        },
+        outline: if ratio < 0.5 {
+            Hsla {
+                h: 0.0,
+                s: 0.0,
+                l: 1.0,
+                a: 0.22,
+            }
+        } else {
+            Hsla {
+                h: 0.0,
+                s: 0.0,
+                l: 0.0,
+                a: 0.13,
+            }
         },
         shadow: Hsla {
             h: 0.0,
             s: 0.0,
             l: 0.0,
-            a: lerp(0.50, 0.12, ratio),
+            a: lerp(0.50, 0.16, ratio),
         },
     }
 }

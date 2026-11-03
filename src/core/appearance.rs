@@ -273,7 +273,9 @@ impl Default for Appearance {
             background_image: String::new(),
             // 默认就偏透：液态玻璃的第一要义是能看见窗口后面的东西。
             background_opacity: 35,
-            lightness: 18,
+            // 默认是浅色玻璃：白/浅灰半透面板 + 淡蓝灰渐变底。
+            // 想回到深色玻璃把明暗拉到 30 以下即可。
+            lightness: 86,
             accent: Accent::Green,
             font: FontChoice::FollowSystem,
             lock_window_color: false,

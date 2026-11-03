@@ -19,9 +19,9 @@ use gpui_kit::component::{
 };
 use gpui_kit::{
     AnyElement, App, BoxShadow, Context, Div, ElementId, FontWeight, Hsla, ImageSource,
-    IntoElement, MouseButton, ObjectFit, ParentElement as _, PathPromptOptions, Pixels, Render,
-    Resource, SharedString, Styled as _, Window, WindowBackgroundAppearance, div, img,
-    linear_color_stop, linear_gradient, point, prelude::*, px,
+    IntoElement, MouseButton, ObjectFit, ParentElement as _, PathPromptOptions, Render, Resource,
+    SharedString, Styled as _, Window, WindowBackgroundAppearance, div, img, linear_color_stop,
+    linear_gradient, point, prelude::*, px,
 };
 
 use crate::core::backup::BackupManager;
@@ -296,7 +296,7 @@ fn card(cx: &App) -> Div {
         .rounded(px(theme::RADIUS_PANEL))
         .bg(g.surface)
         .border_1()
-        .border_color(g.highlight)
+        .border_color(g.outline)
         .shadow(vec![
             // 皮肤的投影很收敛（blur 4），这里放大到 24 是因为卡片本身很大，
             // 否则浮不起来；透明度同步压低，避免发灰。
@@ -315,60 +315,6 @@ fn card(cx: &App) -> Div {
                 inset: true,
             },
         ])
-}
-
-/// 背景柔光：一个透明圆，只留它的高斯模糊投影。
-///
-/// GPUI 既没有背景模糊，也没有径向渐变，能给出「无分层平滑衰减」的原语只有阴影模糊。
-/// 所以这里画一个形状可见、填充透明的圆，把 `blur_radius` 放大到接近自身尺寸，
-/// 投影便摊成一片光晕：边缘由高斯核自然收敛，不存在任何硬边。
-///
-/// 早期版本用多层同心圆逐层叠 alpha 近似径向渐变，深色底上会出现肉眼可见的环带，
-/// 无论怎么加密层数都只能把环推细而不能消除，故改为本方案。
-/// 背景柔光：多层同心圆近似径向渐变。
-///
-/// GPUI 没有背景模糊，也没有径向渐变，能画出来的只有圆和线性渐变。
-/// 试过两条路都不可行：单层圆留硬边；用大半径阴影模糊（`blur_radius` ≈ 260px）
-/// 会因采样精度不足出现多边形棱边与网格接缝。所以只能老老实实叠同心圆。
-///
-/// 关键在于**衰减曲线**：按 `(1-u)^2.2` 分配各层 alpha（u 为归一化半径，外圈为 1），
-/// 使每层的 alpha 增量在**外圈趋近于零**——那正是肉眼最容易看出环带的位置；
-/// 增量集中在内圈，那里表面已被下层铺满、局部对比度极低，看不出台阶。
-/// 层数取 64，配合该曲线可把外圈的步进压到 0.4% 以下（1/255 ≈ 0.39%）。
-fn glow(size: Pixels, color: Hsla, center_top: Pixels, center_left: Pixels) -> Vec<Div> {
-    const LAYERS: usize = 64;
-    const FALLOFF: f32 = 1.9;
-    const OUTER_SCALE: f32 = 0.75;
-
-    let mut layers = Vec::with_capacity(LAYERS);
-    let mut previous = 0.0_f32;
-    for index in 0..LAYERS {
-        // index 0 是最外圈（u = 1），逐层收到最内圈（u = 0）。
-        let u = 1.0 - index as f32 / (LAYERS - 1) as f32;
-        // 该半径处期望的累计不透明度。
-        let target = color.a * (1.0 - u).powf(FALLOFF);
-        // 已知下层已累计 previous，反解本层需要补的 alpha。
-        let alpha = 1.0 - (1.0 - target) / (1.0 - previous);
-        previous = target;
-
-        let layer_size = size * (1.0 + OUTER_SCALE * u);
-        layers.push(
-            div()
-                .absolute()
-                .top(center_top + (size - layer_size) / 2.0)
-                .left(center_left + (size - layer_size) / 2.0)
-                .w(layer_size)
-                .h(layer_size)
-                .rounded_full()
-                .bg(Hsla {
-                    h: color.h,
-                    s: color.s,
-                    l: color.l,
-                    a: alpha,
-                }),
-        );
-    }
-    layers
 }
 
 /// 分区小标题。
@@ -906,7 +852,7 @@ impl AppShell {
             // 与侧栏同一层玻璃：常驻容器比卡片更实，靠边框与内容区分层。
             .bg(g.surface_strong)
             .border_b_1()
-            .border_color(g.highlight)
+            .border_color(g.outline)
             .child(left)
             // 拖动区：图标与菜单之后到右侧控件之前，与真实标题栏行为一致。
             .child(
@@ -989,7 +935,7 @@ impl AppShell {
             // 浮层取玻璃的实体形态：贴在正文上方，不能跟着背景一起变虚。
             .bg(g.overlay)
             .border_1()
-            .border_color(g.highlight)
+            .border_color(g.outline)
             .shadow(vec![BoxShadow {
                 color: g.shadow,
                 offset: point(px(0.), px(8.)),
@@ -1081,7 +1027,7 @@ impl AppShell {
         strip
             .bg(g.surface_strong)
             .border_b_1()
-            .border_color(g.highlight)
+            .border_color(g.outline)
     }
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> Div {
@@ -1134,7 +1080,7 @@ impl AppShell {
             .gap_2()
             .bg(g.surface_strong)
             .border_r_1()
-            .border_color(g.highlight)
+            .border_color(g.outline)
             .child(nav)
             .child(div().flex_1())
             .child(
@@ -1171,10 +1117,12 @@ impl AppShell {
                 .text_color(t.colors.foreground)
                 .child(self.page.label()),
         );
+        // 说明文字直接落在窗口底色上，而底色是半透的——后面是深色壁纸时它会降到中灰，
+        // 次级灰字（实测 2.7:1）根本压不住，所以这里用主色，靠字号和字重区分层级。
         title_row = title_row.child(
             div()
                 .text_xs()
-                .text_color(t.colors.muted_foreground)
+                .text_color(t.colors.foreground)
                 .child(self.page.description()),
         );
         head = head.child(title_row);
@@ -2354,8 +2302,6 @@ impl Render for AppShell {
             .overflow_hidden()
             .bg(background)
             .text_color(t.colors.foreground)
-            .children(glow(px(460.), g.glow, px(10.), px(820.)))
-            .children(glow(px(420.), g.glow, px(620.), px(-170.)))
             .when_some(self.background_layer(g), |this, image| this.child(image))
             .child(shell);
         match font {
