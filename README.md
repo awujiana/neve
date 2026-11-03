@@ -86,27 +86,17 @@
 
 ## 📷 展示图
 
-> 界面为**液态玻璃**风格：半透明面板浮在渐变底色与柔光之上，靠内高光边、柔和投影与材质层次营造通透感。GPUI 不提供背景模糊，因此以「半透明填充 + 斜向渐变 + 内高光 + 多层衰减光斑」逼近该质感。深浅两套主题共用同一套设计令牌。
+> 界面为**液态玻璃**风格，取自 `UI/modern_glass_zh`：中性无彩的深色玻璃、发丝亮边、大圆角、选中反白。窗口材质支持关闭 / 透明 / 亚克力 / 模糊（Windows 下为 DWM 真实合成模糊），并可用「明暗」连续调节；**液态玻璃模式不区分深色浅色主题**。
 
 <table align="center">
   <tr>
     <td align="center" width="50%">
-      <img src="docs/screenshots/overview-dark.png" alt="概览页（深色）" width="100%">
-      <br><sub><b>概览页</b> · 深色</sub>
+      <img src="docs/screenshots/overview-glass.png" alt="概览页" width="100%">
+      <br><sub><b>概览页</b></sub>
     </td>
     <td align="center" width="50%">
-      <img src="docs/screenshots/overview-light.png" alt="概览页（浅色）" width="100%">
-      <br><sub><b>概览页</b> · 浅色</sub>
-    </td>
-  </tr>
-  <tr>
-    <td align="center" width="50%">
-      <img src="docs/screenshots/players-dark.png" alt="播放器页（深色）" width="100%">
-      <br><sub><b>播放器页</b> · 深色</sub>
-    </td>
-    <td align="center" width="50%">
-      <img src="docs/screenshots/players-light.png" alt="播放器页（浅色）" width="100%">
-      <br><sub><b>播放器页</b> · 浅色</sub>
+      <img src="docs/screenshots/settings-glass.png" alt="设置页" width="100%">
+      <br><sub><b>设置页 · 外观</b></sub>
     </td>
   </tr>
 </table>

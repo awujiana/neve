@@ -77,9 +77,28 @@ def client_rect(hwnd: int) -> tuple[int, int, int, int]:
 
 
 def focus(hwnd: int) -> None:
+    """把窗口抢到前台。
+
+    单靠 `SetForegroundWindow` 在 Windows 上会被前台锁拒绝（调用方不是前台进程时），
+    结果 ImageGrab 抓到的是别的窗口。用 `AttachThreadInput` 把当前线程挂到
+    前台窗口的输入队列上，前台锁才会放行，最后校验一次句柄。
+    """
     user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+    user32.SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0001 | 0x0002)  # HWND_TOPMOST, NOSIZE|NOMOVE
+    user32.SwitchToThisWindow(hwnd, True)
+
+    kernel32 = ctypes.windll.kernel32
+    foreground = user32.GetForegroundWindow()
+    foreground_thread = user32.GetWindowThreadProcessId(foreground, None)
+    current_thread = kernel32.GetCurrentThreadId()
+    user32.AttachThreadInput(current_thread, foreground_thread, True)
     user32.SetForegroundWindow(hwnd)
-    time.sleep(0.25)
+    user32.AttachThreadInput(current_thread, foreground_thread, False)
+
+    user32.SetWindowPos(hwnd, -2, 0, 0, 0, 0, 0x0001 | 0x0002)  # HWND_NOTOPMOST
+    time.sleep(0.35)
+    if user32.GetForegroundWindow() != hwnd:
+        print("[警告] 窗口未能切到前台，截图可能抓到别的窗口")
 
 
 def click(hwnd: int, x: int, y: int) -> None:

@@ -17,9 +17,9 @@ use gpui_kit::component::{
     ActiveTheme as _, InteractiveElementExt as _, Sizable as _, Size, h_flex, v_flex,
 };
 use gpui_kit::{
-    AnyElement, App, BoxShadow, Context, Div, ElementId, Hsla, IntoElement, MouseButton,
-    ParentElement as _, Pixels, Render, SharedString, Styled as _, Window, div, linear_color_stop,
-    linear_gradient, point, prelude::*, px,
+    AnyElement, App, BoxShadow, Context, Div, ElementId, FontWeight, Hsla, IntoElement,
+    MouseButton, ParentElement as _, Pixels, Render, SharedString, Styled as _, Window,
+    WindowBackgroundAppearance, div, linear_color_stop, linear_gradient, point, prelude::*, px,
 };
 
 use crate::core::backup::BackupManager;
@@ -33,7 +33,11 @@ use crate::core::scripts::{
 };
 use crate::core::sync::{ConflictPolicy, SyncKind, apply_sync, plan_script_sync};
 
-pub use theme::apply as apply_theme;
+pub use theme::set_appearance as apply_theme;
+
+use crate::core::appearance::{
+    Accent, Appearance, FontChoice, Material, TabLayout, TitlebarPosition,
+};
 
 // ---------------------------------------------------------------------------
 // 视图模型
@@ -283,20 +287,22 @@ impl Page {
 /// 3. 内侧 inset 阴影 —— 顶部内侧一条细亮线，这是液态玻璃最关键的读感；
 /// 4. 向下的柔和投影 —— 把卡片从背景层抬起。
 fn card(cx: &App) -> Div {
-    let g = theme::glass(cx);
+    let g = theme::current_glass(cx);
     v_flex()
         .gap_3()
         .p_4()
-        .rounded(px(14.))
+        .rounded(px(theme::RADIUS_PANEL))
         .bg(g.surface)
         .border_1()
         .border_color(g.highlight)
         .shadow(vec![
+            // 皮肤的投影很收敛（blur 4），这里放大到 24 是因为卡片本身很大，
+            // 否则浮不起来；透明度同步压低，避免发灰。
             BoxShadow {
                 color: g.shadow,
-                offset: point(px(0.), px(12.)),
-                blur_radius: px(32.),
-                spread_radius: px(-8.),
+                offset: point(px(0.), px(8.)),
+                blur_radius: px(24.),
+                spread_radius: px(-6.),
                 inset: false,
             },
             BoxShadow {
@@ -372,11 +378,14 @@ fn section_title(text: impl Into<SharedString>, cx: &App) -> Div {
 }
 
 /// 分区之间的分隔线（同时提供留白）。
+///
+/// 用弱化的 `border`：皮肤里的分隔线是「玻璃上的细线」（#6A6A72 带透明度），
+/// 直接铺满不透明边框会把卡片切成两块。
 fn section_divider(cx: &App) -> Div {
     div()
         .pt_3()
         .border_t_1()
-        .border_color(cx.theme().colors.border)
+        .border_color(cx.theme().colors.border.opacity(0.45))
 }
 
 /// 小徽标。文字与底色配对，保证任意主题下对比度可读。
@@ -385,11 +394,76 @@ fn badge(label: impl Into<SharedString>, fg: Hsla, bg: Hsla) -> Div {
         .h(px(18.))
         .px_2()
         .items_center()
-        .rounded(px(4.))
+        .rounded_full()
         .bg(bg)
         .text_color(fg)
         .text_xs()
         .child(label.into())
+}
+
+/// 标题栏菜单。参考软件把 编辑 / 窗口 / 帮助 / 关于 放在左上角，
+/// 这里保留同样的四项，动作接到已有能力上。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TopMenu {
+    Edit,
+    Window,
+    Help,
+    About,
+}
+
+impl TopMenu {
+    const ALL: [TopMenu; 4] = [
+        TopMenu::Edit,
+        TopMenu::Window,
+        TopMenu::Help,
+        TopMenu::About,
+    ];
+
+    fn label(&self) -> &'static str {
+        match self {
+            TopMenu::Edit => "编辑(E)",
+            TopMenu::Window => "窗口(W)",
+            TopMenu::Help => "帮助(H)",
+            TopMenu::About => "关于(A)",
+        }
+    }
+}
+
+/// 标题栏上的图标按钮（面板开关 / 搜索 / 筛选）。
+///
+/// 用字形而不是图标组件：组件库的 SVG 图标在资源缺失时会渲染成空白，
+/// 窗口控制按钮已经踩过一次，这里保持一致。
+fn toolbar_icon(
+    id: &'static str,
+    glyph: &'static str,
+    fg: Hsla,
+    hover_bg: Hsla,
+    hover_fg: Hsla,
+    on_click: impl Fn(&gpui_kit::ClickEvent, &mut Window, &mut App) + 'static,
+) -> gpui_kit::Stateful<Div> {
+    h_flex()
+        .id(ElementId::Name(SharedString::from(id)))
+        .w(px(26.))
+        .h(px(24.))
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .rounded(px(6.))
+        .text_sm()
+        .text_color(fg)
+        .cursor_pointer()
+        .hover(move |style| style.bg(hover_bg).text_color(hover_fg))
+        .on_click(on_click)
+        .child(glyph)
+}
+
+/// 材质到窗口背景外观的映射。窗口创建与运行时切换共用。
+pub fn window_background(material: Material) -> WindowBackgroundAppearance {
+    match material {
+        Material::Off | Material::CustomImage => WindowBackgroundAppearance::Opaque,
+        Material::Transparent => WindowBackgroundAppearance::Transparent,
+        Material::Acrylic | Material::Blur => WindowBackgroundAppearance::Blurred,
+    }
 }
 
 /// 窗口控制按钮的动作。
@@ -476,6 +550,7 @@ fn stat_card(value: impl Into<SharedString>, label: &'static str, hint: String, 
         .child(
             div()
                 .text_xl()
+                .font_weight(FontWeight::SEMIBOLD)
                 .text_color(cx.theme().colors.primary)
                 .child(value.into()),
         )
@@ -503,21 +578,29 @@ pub struct AppShell {
     policy: ConflictPolicy,
     status: Option<StatusMessage>,
     page: Page,
-    dark: bool,
+    /// 外观设置：材质、明暗、字体、布局都在这里，改动即存盘并重投影。
+    appearance: Appearance,
     /// 已展开完整脚本列表的播放器下标（默认只显示前几条）。
     expanded_scripts: Vec<usize>,
+    /// 标题栏当前展开的菜单项。
+    open_menu: Option<TopMenu>,
 }
 
 impl AppShell {
-    pub fn new(players: Vec<DetectedPlayer>, panels: Vec<PlayerPanel>, dark: bool) -> Self {
+    pub fn new(
+        players: Vec<DetectedPlayer>,
+        panels: Vec<PlayerPanel>,
+        appearance: Appearance,
+    ) -> Self {
         Self {
             players,
             panels,
             policy: ConflictPolicy::Skip,
             status: None,
             page: Page::Overview,
-            dark,
+            appearance,
             expanded_scripts: Vec::new(),
+            open_menu: None,
         }
     }
 
@@ -552,14 +635,45 @@ impl AppShell {
         cx.notify();
     }
 
-    fn toggle_theme(&mut self, cx: &mut Context<Self>) {
-        self.dark = !self.dark;
-        let mode = if self.dark {
-            gpui_kit::component::theme::ThemeMode::Dark
-        } else {
-            gpui_kit::component::theme::ThemeMode::Light
+    /// 不涉及窗口材质的设置改动（布局、字体、主题色等）。
+    fn apply_without_window(
+        &mut self,
+        cx: &mut Context<Self>,
+        change: impl FnOnce(&mut Appearance),
+    ) {
+        change(&mut self.appearance);
+        theme::set_appearance(cx, self.appearance.clone());
+        if let Err(error) = self.appearance.save() {
+            self.status = Some(StatusMessage::warning(format!("外观设置保存失败：{error}")));
+        }
+        cx.notify();
+    }
+
+    /// 标题栏的「面板」图标：在侧栏与顶栏两种 Tab 布局之间切换。
+    fn toggle_tab_layout(&mut self, cx: &mut Context<Self>) {
+        let next = match self.appearance.tab_layout {
+            TabLayout::Sidebar => TabLayout::TopBar,
+            TabLayout::TopBar => TabLayout::Sidebar,
         };
-        theme::apply(cx, mode);
+        self.apply_without_window(cx, |appearance| appearance.tab_layout = next);
+    }
+
+    /// 改一项外观设置：立即重投影主题、同步窗口材质，并写回磁盘。
+    ///
+    /// 写盘失败不打断交互（用户正在拖滑杆），只在状态栏提示一次。
+    fn update_appearance(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        change: impl FnOnce(&mut Appearance),
+    ) {
+        change(&mut self.appearance);
+        theme::set_appearance(cx, self.appearance.clone());
+        // 窗口材质是平台能力，改完要立刻同步给窗口。
+        window.set_background_appearance(window_background(self.appearance.material));
+        if let Err(error) = self.appearance.save() {
+            self.status = Some(StatusMessage::warning(format!("外观设置保存失败：{error}")));
+        }
         cx.notify();
     }
 
@@ -704,26 +818,92 @@ impl AppShell {
     /// 左侧区域承担窗口拖动与双击最大化，右侧是最小化/最大化/关闭。
     fn render_title_bar(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let t = cx.theme();
-        let g = theme::glass(cx);
-        let theme_label = if self.dark { "浅色" } else { "深色" };
+        let g = theme::current_glass(cx);
         let fg = t.colors.foreground;
         let muted = t.colors.muted_foreground;
         let hover_bg = t.colors.accent;
         let danger_bg = t.colors.danger;
         let danger_fg = t.colors.primary_foreground;
         let maximize_glyph = if window.is_maximized() { "❐" } else { "▢" };
+        let divider = t.colors.border.opacity(0.45);
+        let accent_bg = t.colors.accent;
+
+        // 左簇：面板开关 / 搜索 / 筛选 三个图标按钮 + 四个文字菜单。
+        // 这是参考软件的窗口左上角结构，保留 Névé 标识在其后。
+        let mut left = h_flex().flex_none().items_center().gap_1().pl_2();
+        left = left.child(toolbar_icon(
+            "tb-sidebar",
+            "☰",
+            muted,
+            hover_bg,
+            fg,
+            cx.listener(|this, _, _, cx| {
+                this.toggle_tab_layout(cx);
+            }),
+        ));
+        left = left.child(toolbar_icon(
+            "tb-search",
+            "⌕",
+            muted,
+            hover_bg,
+            fg,
+            cx.listener(|this, _, _, cx| {
+                this.page = Page::Settings;
+                this.status = Some(StatusMessage::info("搜索框随设置页一起接入。"));
+                cx.notify();
+            }),
+        ));
+        left = left.child(toolbar_icon(
+            "tb-filter",
+            "▽",
+            muted,
+            hover_bg,
+            fg,
+            cx.listener(|this, _, _, cx| this.cycle_policy(cx)),
+        ));
+        left = left.child(div().w(px(1.)).h(px(16.)).flex_none().bg(divider));
+        for menu in TopMenu::ALL {
+            let active = self.open_menu == Some(menu);
+            let mut item = h_flex()
+                .id(ElementId::Name(SharedString::from(format!(
+                    "menu-{}",
+                    menu.label()
+                ))))
+                .relative()
+                .h(px(24.))
+                .px_2()
+                .items_center()
+                .rounded(px(6.))
+                .text_xs()
+                .text_color(if active { fg } else { muted })
+                .cursor_pointer()
+                .when(active, move |this| this.bg(accent_bg))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.open_menu = if this.open_menu == Some(menu) {
+                        None
+                    } else {
+                        Some(menu)
+                    };
+                    cx.notify();
+                }))
+                .child(menu.label());
+            if active {
+                item = item.child(self.render_menu_popup(menu, window, cx));
+            }
+            left = left.child(item);
+        }
 
         h_flex()
             .flex_none()
             .h(px(34.))
-            .pl_3()
             .items_center()
             .gap_2()
-            // 常驻容器用更实的玻璃，与卡片区分层级（规范 §4.1 第 2 层）。
+            // 与侧栏同一层玻璃：常驻容器比卡片更实，靠边框与内容区分层。
             .bg(g.surface_strong)
             .border_b_1()
             .border_color(g.highlight)
-            // 拖动区：占据标题栏左侧剩余空间，与真实标题栏行为一致。
+            .child(left)
+            // 拖动区：图标与菜单之后到右侧控件之前，与真实标题栏行为一致。
             .child(
                 h_flex()
                     .id("titlebar-drag")
@@ -732,16 +912,17 @@ impl AppShell {
                     .h_full()
                     .items_center()
                     .gap_2()
+                    .pl_2()
                     .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
                     .on_double_click(|_, window, _| window.zoom_window())
-                    .child(div().text_sm().text_color(fg).child("Névé"))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(fg)
+                            .child("Névé"),
+                    )
                     .child(div().text_xs().text_color(muted).child("粒雪 · MPV 管理器")),
-            )
-            .child(
-                Button::new("toggle-theme")
-                    .label(theme_label)
-                    .with_size(Size::Small)
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_theme(cx))),
             )
             .child(
                 Button::new("rescan")
@@ -782,17 +963,129 @@ impl AppShell {
             )
     }
 
+    /// 菜单弹出层。挂在菜单按钮内部（按钮自身 `relative`），
+    /// 因此天然对齐到按钮左边缘，不需要手工算偏移。
+    fn render_menu_popup(
+        &self,
+        menu: TopMenu,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let t = cx.theme();
+        let g = theme::current_glass(cx);
+        let mut panel = v_flex()
+            .absolute()
+            .top(px(26.))
+            .left(px(0.))
+            .w(px(168.))
+            .p_1()
+            .gap_1()
+            .rounded(px(10.))
+            .bg(g.surface_strong)
+            .border_1()
+            .border_color(g.highlight)
+            .shadow(vec![BoxShadow {
+                color: g.shadow,
+                offset: point(px(0.), px(8.)),
+                blur_radius: px(20.),
+                spread_radius: px(-4.),
+                inset: false,
+            }])
+            .text_color(t.colors.foreground);
+
+        let entry = |label: &'static str, disabled: bool| {
+            let fg = if disabled {
+                t.colors.muted_foreground
+            } else {
+                t.colors.foreground
+            };
+            h_flex()
+                .h(px(26.))
+                .px_2()
+                .items_center()
+                .rounded(px(6.))
+                .text_xs()
+                .text_color(fg)
+                .child(label)
+        };
+
+        match menu {
+            TopMenu::Edit => {
+                panel = panel.child(entry("撤销最近一次写入", false));
+                panel = panel.child(entry("复制播放器清单", true));
+            }
+            TopMenu::Window => {
+                panel = panel.child(entry("最小化", false));
+                panel = panel.child(entry("最大化 / 还原", false));
+                panel = panel.child(entry("关闭", false));
+            }
+            TopMenu::Help => {
+                panel = panel.child(entry("界面说明", false));
+                panel = panel.child(entry("更新日志", true));
+            }
+            TopMenu::About => {
+                panel = panel.child(entry("Névé 粒雪", false));
+                panel = panel.child(entry(env!("CARGO_PKG_VERSION"), true));
+            }
+        }
+        panel
+    }
+
     // -----------------------------------------------------------------------
     // 侧栏
     // -----------------------------------------------------------------------
+
+    /// 顶栏 Tab 布局：主导航变成标题栏下方的横向胶囊条。
+    fn render_tab_strip(&self, cx: &mut Context<Self>) -> Div {
+        let t = cx.theme();
+        let g = theme::current_glass(cx);
+        let mut strip = h_flex().gap_1().items_center().px_4().py_2();
+        for page in Page::ALL {
+            let selected = page == self.page;
+            let fg = if selected {
+                t.colors.primary_foreground
+            } else {
+                t.colors.muted_foreground
+            };
+            let hover = t.colors.secondary;
+            let mut tab = h_flex()
+                .id(ElementId::Name(SharedString::from(format!(
+                    "tab-{}",
+                    page.label()
+                ))))
+                .h(px(26.))
+                .px_3()
+                .items_center()
+                .rounded(px(theme::RADIUS_PILL))
+                .text_xs()
+                .text_color(fg)
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.page = page;
+                    cx.notify();
+                }))
+                .child(page.label());
+            if selected {
+                tab = tab.bg(t.colors.primary);
+            } else {
+                tab = tab.hover(move |style| style.bg(hover));
+            }
+            strip = strip.child(tab);
+        }
+        strip
+            .bg(g.surface_strong)
+            .border_b_1()
+            .border_color(g.highlight)
+    }
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> Div {
         let t = cx.theme();
         let mut nav = v_flex().gap_1();
         for page in Page::ALL {
             let selected = page == self.page;
+            // 选中项反白：白底黑字（深色）/ 黑底白字（浅色）。
             let fg = if selected {
-                t.colors.sidebar_accent_foreground
+                t.colors.primary_foreground
             } else {
                 t.colors.sidebar_foreground
             };
@@ -801,11 +1094,11 @@ impl AppShell {
                     "nav-{}",
                     page.label()
                 ))))
-                .h(px(30.))
-                .px_2()
+                .h(px(32.))
+                .px_3()
                 .gap_2()
                 .items_center()
-                .rounded(t.radius)
+                .rounded(px(theme::RADIUS_PILL))
                 .text_sm()
                 .text_color(fg)
                 .cursor_pointer()
@@ -815,22 +1108,17 @@ impl AppShell {
                 }))
                 .child(div().text_color(fg).child(page.label()));
             if selected {
-                // 选中态同时用背景、左侧标记与文字强调表达，不只靠颜色（规范 §3）。
-                item = item
-                    .bg(t.colors.sidebar_accent)
-                    .border_l_2()
-                    .border_color(t.colors.primary)
-                    .child(div().flex_1())
-                    .child(div().text_xs().text_color(t.colors.primary).child("•"));
+                // modern_glass 的选中态是「反白胶囊」，不叠彩色底、不加左侧标记条。
+                item = item.bg(t.colors.primary);
             } else {
                 // 悬停底色弱于选中底色，避免两者混淆。
-                let hover = t.colors.sidebar_accent.opacity(0.45);
+                let hover = t.colors.sidebar_accent.opacity(0.55);
                 item = item.hover(move |style| style.bg(hover));
             }
             nav = nav.child(item);
         }
 
-        let g = theme::glass(cx);
+        let g = theme::current_glass(cx);
         v_flex()
             .flex_none()
             .w(px(184.))
@@ -873,6 +1161,7 @@ impl AppShell {
         let mut title_row = h_flex().items_center().gap_3().child(
             div()
                 .text_lg()
+                .font_weight(FontWeight::SEMIBOLD)
                 .text_color(t.colors.foreground)
                 .child(self.page.label()),
         );
@@ -913,7 +1202,8 @@ impl AppShell {
             head = head.child(tools);
         }
 
-        head.border_b_1().border_color(theme::glass(cx).highlight)
+        head.border_b_1()
+            .border_color(theme::current_glass(cx).highlight)
     }
 
     // -----------------------------------------------------------------------
@@ -1090,6 +1380,7 @@ impl AppShell {
         let mut title_row = h_flex().items_center().gap_2().child(
             div()
                 .text_sm()
+                .font_weight(FontWeight::SEMIBOLD)
                 .text_color(t.colors.foreground)
                 .child(panel.name.clone()),
         );
@@ -1499,6 +1790,299 @@ impl AppShell {
     // 未接入页面
     // -----------------------------------------------------------------------
 
+    // -----------------------------------------------------------------------
+    // 设置页（外观）
+    // -----------------------------------------------------------------------
+
+    /// 百分比行：减号 + 轨道 + 加号 + 数值。
+    ///
+    /// 没做拖拽：GPUI 里要拿到指针相对轨道的坐标得额外维护 bounds，
+    /// 加减按钮更稳，且同样能到任意值。
+    fn percent_control(
+        &self,
+        cx: &mut Context<Self>,
+        id: &'static str,
+        value: u8,
+        set: fn(&mut Appearance, u8),
+    ) -> AnyElement {
+        let t = cx.theme();
+        let muted = t.colors.muted_foreground;
+        let track = t.colors.border.opacity(0.35);
+        let fill_color = t.colors.primary;
+        let fg = t.colors.foreground;
+        let hover = t.colors.secondary;
+        const TRACK: f32 = 180.;
+        let fill = (TRACK * (f32::from(value) / 100.)).max(2.);
+
+        let minus = h_flex()
+            .id(ElementId::Name(SharedString::from(format!("{id}-minus"))))
+            .w(px(26.))
+            .h(px(24.))
+            .items_center()
+            .justify_center()
+            .rounded(px(6.))
+            .text_sm()
+            .text_color(muted)
+            .cursor_pointer()
+            .hover(move |style| style.bg(hover))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                let next = value.saturating_sub(5);
+                this.update_appearance(window, cx, |appearance| set(appearance, next));
+            }))
+            .child("−");
+        let plus = h_flex()
+            .id(ElementId::Name(SharedString::from(format!("{id}-plus"))))
+            .w(px(26.))
+            .h(px(24.))
+            .items_center()
+            .justify_center()
+            .rounded(px(6.))
+            .text_sm()
+            .text_color(muted)
+            .cursor_pointer()
+            .hover(move |style| style.bg(hover))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                let next = (value + 5).min(100);
+                this.update_appearance(window, cx, |appearance| set(appearance, next));
+            }))
+            .child("+");
+
+        h_flex()
+            .items_center()
+            .gap_3()
+            .child(minus)
+            .child(
+                div()
+                    .w(px(TRACK))
+                    .h(px(4.))
+                    .flex_none()
+                    .rounded_full()
+                    .bg(track)
+                    .child(div().w(px(fill)).h(px(4.)).rounded_full().bg(fill_color)),
+            )
+            .child(plus)
+            .child(
+                div()
+                    .w(px(38.))
+                    .text_xs()
+                    .text_color(fg)
+                    .child(format!("{value}%")),
+            )
+            .into_any_element()
+    }
+
+    /// 主题色板。
+    fn accent_swatches(&self, cx: &mut Context<Self>) -> AnyElement {
+        let t = cx.theme();
+        let ring = t.colors.foreground;
+        let current = self.appearance.accent;
+        let mut row = h_flex().items_center().gap_2();
+        for accent in Accent::ALL {
+            let selected = accent == current;
+            let color = theme::color(accent.swatch());
+            let mut dot = h_flex()
+                .id(ElementId::Name(SharedString::from(format!(
+                    "accent-{}",
+                    accent.label()
+                ))))
+                .w(px(22.))
+                .h(px(22.))
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .bg(color)
+                .cursor_pointer()
+                .when(selected, move |this| this.border_2().border_color(ring))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.update_appearance(window, cx, |appearance| appearance.accent = accent);
+                }));
+            if selected {
+                dot = dot.child(div().text_xs().text_color(theme::color(0x000000)).child(""));
+            }
+            row = row.child(dot);
+        }
+        row.into_any_element()
+    }
+
+    fn render_settings(&self, cx: &mut Context<Self>) -> AnyElement {
+        let a = self.appearance.clone();
+        let mut body = v_flex().gap_4();
+
+        // 控件先各自构造成局部变量，再交给 setting_row：
+        // 若写成 setting_row(cx, …, self.segmented(cx, …))，参数从左到右求值，
+        // `cx` 会先被不可变借用，后面需要可变借用就冲突了。
+        let font_control = segmented(
+            cx,
+            "font",
+            &FontChoice::ALL,
+            a.font,
+            |value| value.label(),
+            |_| true,
+            |appearance, value| appearance.font = value,
+        );
+        let material_control = segmented(
+            cx,
+            "material",
+            &Material::ALL,
+            a.material,
+            |value| value.label(),
+            |_| true,
+            |appearance, value| appearance.material = value,
+        );
+        let opacity_control = self.percent_control(
+            cx,
+            "bg-opacity",
+            a.background_opacity,
+            |appearance, value| {
+                appearance.background_opacity = value;
+            },
+        );
+        let lightness_control =
+            self.percent_control(cx, "lightness", a.lightness, |appearance, value| {
+                appearance.lightness = value;
+            });
+        let titlebar_control = segmented(
+            cx,
+            "titlebar",
+            &TitlebarPosition::ALL,
+            a.titlebar_position,
+            |value| value.label(),
+            |value| value.implemented(),
+            |appearance, value| appearance.titlebar_position = value,
+        );
+        let tab_control = segmented(
+            cx,
+            "tablayout",
+            &TabLayout::ALL,
+            a.tab_layout,
+            |value| value.label(),
+            |_| true,
+            |appearance, value| appearance.tab_layout = value,
+        );
+        let animations_on = a.animations;
+        let animations_control = h_flex()
+            .child(
+                Switch::new("animations")
+                    .checked(animations_on)
+                    .with_size(Size::Small)
+                    .on_click(cx.listener(move |this, checked, window, cx| {
+                        let value = *checked;
+                        this.update_appearance(window, cx, |appearance| {
+                            appearance.animations = value;
+                        });
+                    })),
+            )
+            .into_any_element();
+        let accent_control = self.accent_swatches(cx);
+        let locked = a.lock_window_color;
+        let lock_control = h_flex()
+            .child(
+                Switch::new("lock-color")
+                    .checked(locked)
+                    .with_size(Size::Small)
+                    .on_click(cx.listener(move |this, checked, window, cx| {
+                        let value = *checked;
+                        this.update_appearance(window, cx, |appearance| {
+                            appearance.lock_window_color = value;
+                        });
+                    })),
+            )
+            .into_any_element();
+        let version = div()
+            .text_xs()
+            .text_color(cx.theme().colors.muted_foreground)
+            .child(env!("CARGO_PKG_VERSION"))
+            .into_any_element();
+
+        // --- 外观 ---
+        let mut look = card(cx).gap_0();
+        look = look.child(section_title("外观", cx));
+        look = look.child(setting_row(
+            cx,
+            "应用字体",
+            "选择应用界面字体，修改后立即生效。",
+            font_control,
+        ));
+        look = look.child(section_divider(cx));
+        look = look.child(setting_row(
+            cx,
+            "窗口材质",
+            "透明 / 亚克力 / 模糊 需要系统合成支持，Windows 下走 DWM。",
+            material_control,
+        ));
+        look = look.child(section_divider(cx));
+        look = look.child(setting_row(
+            cx,
+            "背景不透明度",
+            "数值越低，桌面内容透出得越多；材质为「关闭」时恒为不透明。",
+            opacity_control,
+        ));
+        look = look.child(section_divider(cx));
+        look = look.child(setting_row(
+            cx,
+            "明暗",
+            "液态玻璃不再区分深色 / 浅色主题，明暗在这里连续调节。",
+            lightness_control,
+        ));
+        body = body.child(look);
+
+        // --- 布局与动画 ---
+        let mut layout = card(cx).gap_0();
+        layout = layout.child(section_title("布局与动画", cx));
+        layout = layout.child(setting_row(
+            cx,
+            "标题栏位置",
+            "标题栏显示在窗口的顶部或底部；左右两侧的竖排标题栏尚未实现。",
+            titlebar_control,
+        ));
+        layout = layout.child(section_divider(cx));
+        layout = layout.child(setting_row(
+            cx,
+            "Tab 栏布局",
+            "主导航放在左侧常驻侧栏，或标题栏下方的横向 Tab 条。",
+            tab_control,
+        ));
+        layout = layout.child(section_divider(cx));
+        layout = layout.child(setting_row(
+            cx,
+            "动画与动效",
+            "管理界面中的过渡与微动效。关闭后交互立即切换。",
+            animations_control,
+        ));
+        body = body.child(layout);
+
+        // --- 主题 ---
+        let mut theme_card = card(cx).gap_0();
+        theme_card = theme_card.child(section_title("主题", cx));
+        theme_card = theme_card.child(setting_row(
+            cx,
+            "主题颜色",
+            "只影响开关、进度与强调文字，界面主体保持中性。",
+            accent_control,
+        ));
+        theme_card = theme_card.child(section_divider(cx));
+        theme_card = theme_card.child(setting_row(
+            cx,
+            "锁定窗口颜色",
+            "开启后窗口底色不再随「明暗」变化，保持当前取值。",
+            lock_control,
+        ));
+        body = body.child(theme_card);
+
+        // --- 关于 ---
+        let mut about = card(cx).gap_0();
+        about = about.child(section_title("关于", cx));
+        about = about.child(setting_row(
+            cx,
+            "Névé 粒雪",
+            "PCL2 式 MPV 内核播放器管理器。界面风格取自 UI/modern_glass_zh。",
+            version,
+        ));
+        body = body.child(about);
+
+        body.into_any_element()
+    }
+
     fn render_pending(&self, cx: &mut Context<Self>) -> AnyElement {
         let page = self.page;
         let hint = page.milestone().unwrap_or("该模块尚未接入。");
@@ -1514,65 +2098,179 @@ impl AppShell {
     }
 }
 
+// ---------------------------------------------------------------------------
+// 设置页控件
+// ---------------------------------------------------------------------------
+
+fn segmented<T: Copy + PartialEq + 'static>(
+    cx: &mut Context<AppShell>,
+    id_prefix: &'static str,
+    all: &'static [T],
+    current: T,
+    label: fn(&T) -> &'static str,
+    enabled: fn(&T) -> bool,
+    apply: fn(&mut Appearance, T),
+) -> AnyElement {
+    let track_bg = cx.theme().colors.secondary;
+    let mut row = h_flex().gap_1().p_1().rounded(px(10.)).bg(track_bg);
+    for item in all {
+        let value = *item;
+        let selected = value == current;
+        let usable = enabled(&value);
+        let mut button = seg_button(
+            SharedString::from(format!("{id_prefix}-{}", label(&value))),
+            label(&value),
+            selected,
+            usable,
+            cx,
+        );
+        if usable {
+            button = button.on_click(cx.listener(move |this, _, window, cx| {
+                this.update_appearance(window, cx, |appearance| apply(appearance, value));
+            }));
+        }
+        row = row.child(button);
+    }
+    row.into_any_element()
+}
+
+/// 一行设置：左侧标题 + 说明，右侧控件。
+fn setting_row(
+    cx: &App,
+    title: &'static str,
+    description: &'static str,
+    control: AnyElement,
+) -> Div {
+    let t = cx.theme();
+    h_flex()
+        .items_center()
+        .gap_4()
+        .py_3()
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .gap_1()
+                .child(div().text_sm().text_color(t.colors.foreground).child(title))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(t.colors.muted_foreground)
+                        .child(description),
+                ),
+        )
+        .child(control)
+}
+
+/// 分段控件的一个按钮。
+fn seg_button(
+    id: SharedString,
+    label: &'static str,
+    selected: bool,
+    enabled: bool,
+    cx: &App,
+) -> gpui_kit::Stateful<Div> {
+    let t = cx.theme();
+    let (fg, bg) = if !enabled {
+        (t.colors.muted_foreground.opacity(0.6), None)
+    } else if selected {
+        (t.colors.primary_foreground, Some(t.colors.primary))
+    } else {
+        (t.colors.foreground, None)
+    };
+    h_flex()
+        .id(ElementId::Name(id))
+        .h(px(24.))
+        .px_3()
+        .items_center()
+        .justify_center()
+        .rounded(px(6.))
+        .text_xs()
+        .text_color(fg)
+        .when_some(bg, |this, color| this.bg(color))
+        .when(enabled && !selected, |this| {
+            this.cursor_pointer()
+                .hover(|style| style.bg(t.colors.secondary))
+        })
+        .child(label)
+}
+
 impl Render for AppShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let content = match self.page {
             Page::Overview => self.render_overview(cx),
             Page::Players => self.render_players(cx),
+            Page::Settings => self.render_settings(cx),
             _ => self.render_pending(cx),
         };
         let top_bar = self.render_title_bar(window, cx);
-        let sidebar = self.render_sidebar(cx);
         let header = self.render_page_header(cx);
+        let tab_layout = self.appearance.tab_layout;
+        let titlebar_at_bottom = self.appearance.titlebar_position == TitlebarPosition::Bottom;
+        let sidebar = matches!(tab_layout, TabLayout::Sidebar).then(|| self.render_sidebar(cx));
+        let tab_strip = matches!(tab_layout, TabLayout::TopBar).then(|| self.render_tab_strip(cx));
+        let font = self.appearance.font.family();
         let t = cx.theme();
-        let g = theme::glass(cx);
+        let g = theme::current_glass(cx);
 
-        // 背景层（规范 §4.1 第 1 层）：低饱和斜向渐变 + 两处柔和光斑。
-        // 半透明玻璃表面需要有层次可透，纯色底会让材质看起来仍是平的。
-        // 光斑用多层同心圆叠出衰减，替代 GPUI 缺失的背景模糊。
+        // 背景层：斜向渐变 + 两处柔和光斑。
+        // 背景整体带 alpha：材质为透明/亚克力时窗口层已开启系统合成，
+        // 这里留出透明度，桌面内容才能真的透进来。
         let background = linear_gradient(
             150.,
-            linear_color_stop(theme::color(g.background_start), 0.),
-            linear_color_stop(theme::color(g.background_end), 1.),
+            linear_color_stop(
+                theme::color(g.background_start).opacity(g.background_alpha),
+                0.,
+            ),
+            linear_color_stop(
+                theme::color(g.background_end).opacity(g.background_alpha),
+                1.,
+            ),
         );
 
-        // 根容器显式铺满并给定底色与默认文字色：文字色沿样式树继承到子节点，
-        // 这是上一版「白底浅色字」的直接成因。
-        div()
+        let mut main = h_flex().flex_1().min_h_0().items_stretch();
+        if let Some(sidebar) = sidebar {
+            main = main.child(sidebar);
+        }
+        let mut column = v_flex().flex_1().min_w_0().min_h_0();
+        if let Some(tab_strip) = tab_strip {
+            column = column.child(tab_strip);
+        }
+        column = column
+            .child(header)
+            // 滚动容器：内容区高度受窗口约束，超长列表在此滚动。
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .px_6()
+                    .py_4()
+                    .overflow_y_scrollbar()
+                    .child(content),
+            );
+        main = main.child(column);
+
+        // 标题栏位置：顶部（默认）或底部。标题栏是同一个元素，只换挂载位置。
+        let mut shell = v_flex().size_full();
+        shell = if titlebar_at_bottom {
+            shell.child(main).child(top_bar)
+        } else {
+            shell.child(top_bar).child(main)
+        };
+
+        // 根容器显式铺满并给定底色与默认文字色：文字色沿样式树继承到子节点。
+        let root = div()
             .relative()
             .size_full()
             .overflow_hidden()
             .bg(background)
             .text_color(t.colors.foreground)
-            // 两处柔光：右上为主（透过卡片可见），左下为辅。都压在窗口外沿，
-            // 只露出一段弧，避免在空白区形成「聚光灯」。
             .children(glow(px(460.), g.glow, px(10.), px(820.)))
             .children(glow(px(420.), g.glow, px(620.), px(-170.)))
-            .child(
-                v_flex().size_full().child(top_bar).child(
-                    h_flex()
-                        .flex_1()
-                        .min_h_0()
-                        .items_stretch()
-                        .child(sidebar)
-                        .child(
-                            v_flex()
-                                .flex_1()
-                                .min_w_0()
-                                .min_h_0()
-                                .child(header)
-                                // 滚动容器：内容区高度受窗口约束，超长列表在此滚动。
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_h_0()
-                                        .px_6()
-                                        .py_4()
-                                        .overflow_y_scrollbar()
-                                        .child(content),
-                                ),
-                        ),
-                ),
-            )
+            .child(shell);
+        match font {
+            Some(family) => root.font_family(family),
+            None => root,
+        }
     }
 }
