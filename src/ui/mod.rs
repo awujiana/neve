@@ -8,7 +8,8 @@
 
 mod theme;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::scroll::ScrollableElement as _;
@@ -17,9 +18,10 @@ use gpui_kit::component::{
     ActiveTheme as _, InteractiveElementExt as _, Sizable as _, Size, h_flex, v_flex,
 };
 use gpui_kit::{
-    AnyElement, App, BoxShadow, Context, Div, ElementId, FontWeight, Hsla, IntoElement,
-    MouseButton, ParentElement as _, Pixels, Render, SharedString, Styled as _, Window,
-    WindowBackgroundAppearance, div, linear_color_stop, linear_gradient, point, prelude::*, px,
+    AnyElement, App, BoxShadow, Context, Div, ElementId, FontWeight, Hsla, ImageSource,
+    IntoElement, MouseButton, ObjectFit, ParentElement as _, PathPromptOptions, Pixels, Render,
+    Resource, SharedString, Styled as _, Window, WindowBackgroundAppearance, div, img,
+    linear_color_stop, linear_gradient, point, prelude::*, px,
 };
 
 use crate::core::backup::BackupManager;
@@ -460,9 +462,12 @@ fn toolbar_icon(
 /// 材质到窗口背景外观的映射。窗口创建与运行时切换共用。
 pub fn window_background(material: Material) -> WindowBackgroundAppearance {
     match material {
-        Material::Off | Material::CustomImage => WindowBackgroundAppearance::Opaque,
+        // 自定义背景图也要保留合成：图片缺失或加载失败时窗口才不会整块变黑。
+        Material::Off => WindowBackgroundAppearance::Opaque,
         Material::Transparent => WindowBackgroundAppearance::Transparent,
-        Material::Acrylic | Material::Blur => WindowBackgroundAppearance::Blurred,
+        Material::Acrylic | Material::Blur | Material::CustomImage => {
+            WindowBackgroundAppearance::Blurred
+        }
     }
 }
 
@@ -981,7 +986,8 @@ impl AppShell {
             .p_1()
             .gap_1()
             .rounded(px(10.))
-            .bg(g.surface_strong)
+            // 浮层取玻璃的实体形态：贴在正文上方，不能跟着背景一起变虚。
+            .bg(g.overlay)
             .border_1()
             .border_color(g.highlight)
             .shadow(vec![BoxShadow {
@@ -1904,6 +1910,57 @@ impl AppShell {
         row.into_any_element()
     }
 
+    /// 自定义背景图：铺在渐变之下，占满整窗。
+    ///
+    /// 图片缺失或解码失败时 `img` 什么都不画，窗口仍由系统合成兜底，不会整块变黑。
+    fn background_layer(&self, g: theme::Glass) -> Option<AnyElement> {
+        let path = self.appearance.background_image.trim();
+        if self.appearance.material != Material::CustomImage || path.is_empty() {
+            return None;
+        }
+        let source = ImageSource::Resource(Resource::Path(Arc::from(Path::new(path))));
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .child(
+                    img(source)
+                        .w_full()
+                        .h_full()
+                        .object_fit(ObjectFit::Cover)
+                        .opacity(g.background_alpha),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// 选一张图片做窗口背景。系统文件对话框异步返回，结果回到主线程再落盘。
+    fn choose_background_image(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let prompt = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("选择窗口背景图片".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            // 外层 `Result` 是通道本身被取消，内层才是文件对话框的结果。
+            let Ok(Ok(Some(paths))) = prompt.await else {
+                return;
+            };
+            let Some(path) = paths.into_iter().next() else {
+                return;
+            };
+            // 对话框可能被取消，也可能实体已释放；这两种情况都不值得打断界面。
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.update_appearance(window, cx, |appearance| {
+                    appearance.material = Material::CustomImage;
+                    appearance.background_image = path.to_string_lossy().into_owned();
+                });
+            });
+        })
+        .detach();
+    }
+
     fn render_settings(&self, cx: &mut Context<Self>) -> AnyElement {
         let a = self.appearance.clone();
         let mut body = v_flex().gap_4();
@@ -1929,6 +1986,30 @@ impl AppShell {
             |_| true,
             |appearance, value| appearance.material = value,
         );
+        let background_path = if a.background_image.trim().is_empty() {
+            SharedString::from("未设置")
+        } else {
+            SharedString::from(a.background_image.trim().to_string())
+        };
+        let image_control = h_flex()
+            .gap_2()
+            .child(
+                Button::new("pick-background")
+                    .label("选择…")
+                    .with_size(Size::Small)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.choose_background_image(window, cx);
+                    })),
+            )
+            .child(
+                div()
+                    .max_w(px(260.))
+                    .overflow_hidden()
+                    .text_xs()
+                    .text_color(cx.theme().colors.muted_foreground)
+                    .child(background_path),
+            )
+            .into_any_element();
         let opacity_control = self.percent_control(
             cx,
             "bg-opacity",
@@ -2009,6 +2090,13 @@ impl AppShell {
             "窗口材质",
             "透明 / 亚克力 / 模糊 需要系统合成支持，Windows 下走 DWM。",
             material_control,
+        ));
+        look = look.child(section_divider(cx));
+        look = look.child(setting_row(
+            cx,
+            "自定义背景图",
+            "选一张图片铺满窗口；选完自动切到「自定义背景图」材质。",
+            image_control,
         ));
         look = look.child(section_divider(cx));
         look = look.child(setting_row(
@@ -2259,6 +2347,7 @@ impl Render for AppShell {
         };
 
         // 根容器显式铺满并给定底色与默认文字色：文字色沿样式树继承到子节点。
+        // 底色只有薄薄一层渐变，其余交给窗口层的系统合成，桌面才透得出来。
         let root = div()
             .relative()
             .size_full()
@@ -2267,6 +2356,7 @@ impl Render for AppShell {
             .text_color(t.colors.foreground)
             .children(glow(px(460.), g.glow, px(10.), px(820.)))
             .children(glow(px(420.), g.glow, px(620.), px(-170.)))
+            .when_some(self.background_layer(g), |this, image| this.child(image))
             .child(shell);
         match font {
             Some(family) => root.font_family(family),

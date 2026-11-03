@@ -271,7 +271,8 @@ impl Default for Appearance {
         Self {
             material: Material::Acrylic,
             background_image: String::new(),
-            background_opacity: 80,
+            // 默认就偏透：液态玻璃的第一要义是能看见窗口后面的东西。
+            background_opacity: 35,
             lightness: 18,
             accent: Accent::Green,
             font: FontChoice::FollowSystem,

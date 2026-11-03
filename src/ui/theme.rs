@@ -66,6 +66,12 @@ pub fn color(value: u32) -> Hsla {
     hsla(value)
 }
 
+/// 给语义色套一层不透明度。玻璃界面的每一次填充都要经过这里，
+/// 否则组件库会拿实色铺满，桌面就再也透不进来。
+fn tinted(value: u32, alpha: f32) -> Hsla {
+    hsla(value).opacity(alpha.clamp(0., 1.))
+}
+
 /// 按比例在两个 `0xRRGGBB` 之间线性插值。
 fn mix(from: u32, to: u32, ratio: f32) -> u32 {
     let channel = |shift: u32| {
@@ -92,7 +98,8 @@ pub fn palette(ratio: f32) -> Palette {
         surface: mix(0x1b1b1f, 0xffffff, ratio),
         surface_hover: mix(0x26262b, 0xe8e8ec, ratio),
         text_primary: mix(0xf2f2f5, 0x1a1a1c, ratio),
-        text_secondary: mix(0x8a8a92, 0x6b6b70, ratio),
+        // 次级文字要更亮：玻璃底下会透出任意颜色的桌面，中性灰压得太暗就读不出来了。
+        text_secondary: mix(0xb8b8c0, 0x55555c, ratio),
         border: mix(0x666667, 0xb4b4ba, ratio),
         // 强调色随明暗翻转：暗底用白，亮底用近黑。
         accent: mix(0xf2f2f5, 0x1a1a1c, ratio),
@@ -119,6 +126,8 @@ pub struct Glass {
     pub surface: Hsla,
     /// 侧栏 / 标题栏等常驻容器。
     pub surface_strong: Hsla,
+    /// 菜单、弹层等浮层：玻璃的「实体形态」，接近不透明，保证文字可读。
+    pub overlay: Hsla,
     /// 发丝高光边。
     pub highlight: Hsla,
     /// 柔和投影色。
@@ -128,33 +137,36 @@ pub struct Glass {
 /// 材质对应的表面不透明度：越「模糊」越实，越「透明」越虚。
 fn surface_alpha(material: Material) -> f32 {
     match material {
-        Material::Off => 0.94,
-        Material::Transparent => 0.30,
-        Material::Acrylic => 0.55,
-        Material::Blur => 0.66,
-        Material::CustomImage => 0.58,
+        Material::Off => 1.0,
+        Material::Transparent => 0.28,
+        Material::Acrylic => 0.50,
+        Material::Blur => 0.62,
+        Material::CustomImage => 0.54,
     }
 }
 
 /// 由外观设置生成玻璃令牌。
+///
+/// 所有面板的不透明度都走同一条式子：材质定基调，「背景不透明度」滑杆在其上增减。
+/// 材质关闭时滑杆值恒为 1，式子退化为全实色；滑杆拉到 0 时保留一层薄底，
+/// 免得文字直接贴在桌面上辨认不出。
 pub fn glass(appearance: &Appearance) -> Glass {
     let ratio = appearance.lightness_ratio();
-    let alpha = surface_alpha(appearance.material);
+    let alpha = appearance.background_alpha();
+    // 面板比窗口底色实一些：底色越透，文字越需要一个稳定的底，
+    // 所以面板只用一半的幅度跟随滑杆，剩下的当作可读性的地板。
+    let scale = 0.45 + 0.55 * alpha;
+    let material_alpha = surface_alpha(appearance.material);
+    let panel_alpha = (material_alpha * scale).clamp(0.10, 1.);
+    let strong_alpha = ((material_alpha + 0.20) * scale).clamp(0.14, 1.);
+    // 浮层是玻璃的实体形态：不随滑杆变虚，否则菜单文字会浮在桌面上读不清。
+    let overlay_alpha = (strong_alpha + 0.34).min(0.97);
     // 卡片色调：暗底用黑压暗，亮底用白提亮，中间过渡成中性灰。
-    let (tint_lightness, tint_alpha) = if ratio < 0.5 {
-        (0.0, alpha)
-    } else {
-        (1.0, alpha * 0.82)
-    };
-    let (strong_lightness, strong_alpha) = if ratio < 0.5 {
-        (0.0, (alpha + 0.32).min(0.96))
-    } else {
-        (1.0, (alpha + 0.12).min(0.95))
-    };
+    let (tint_lightness, strong_lightness) = if ratio < 0.5 { (0.0, 0.0) } else { (1.0, 1.0) };
     Glass {
         background_start: mix(0x25252b, 0xf6f6f8, ratio),
         background_end: mix(0x151518, 0xdcdce2, ratio),
-        background_alpha: appearance.background_alpha(),
+        background_alpha: alpha,
         glow: Hsla {
             h: 0.0,
             s: 0.0,
@@ -165,13 +177,19 @@ pub fn glass(appearance: &Appearance) -> Glass {
             h: 0.0,
             s: 0.0,
             l: tint_lightness,
-            a: tint_alpha,
+            a: panel_alpha,
         },
         surface_strong: Hsla {
             h: 0.0,
             s: 0.0,
             l: strong_lightness,
             a: strong_alpha,
+        },
+        overlay: Hsla {
+            h: 0.0,
+            s: 0.0,
+            l: strong_lightness,
+            a: overlay_alpha,
         },
         highlight: Hsla {
             h: 0.0,
@@ -213,33 +231,38 @@ pub fn set_appearance(cx: &mut App, appearance: Appearance) {
     };
     Theme::change(mode, None, cx);
     let p = palette(appearance.lightness_ratio());
+    let g = glass(&appearance);
     let accent = accent_color(appearance.accent, p);
     cx.set_global(CurrentAppearance(appearance));
     Theme::update(cx, |theme| {
         let c = &mut theme.colors;
-        c.background = hsla(p.background);
-        c.muted = hsla(p.background_secondary);
-        c.sidebar = hsla(p.background_secondary);
+        // 背景链的第一层必须清空：gpui-component 的 Root 会用 `tokens.background`
+        // 给整窗刷一层底色，实色一铺，窗口层的亚克力就再也看不见了。
+        // 窗口底色改由我们自己的根容器画带 alpha 的渐变。
+        c.background = tinted(p.background, 0.);
+        c.muted = tinted(p.background_secondary, g.surface_strong.a);
+        c.sidebar = tinted(p.background_secondary, g.surface_strong.a);
         c.sidebar_foreground = hsla(p.text_primary);
         c.sidebar_border = hsla(p.border);
-        c.sidebar_accent = hsla(p.surface_hover);
+        c.sidebar_accent = tinted(p.surface_hover, g.surface.a + 0.12);
         c.sidebar_accent_foreground = hsla(p.text_primary);
-        c.group_box = hsla(p.surface);
+        c.group_box = tinted(p.surface, g.surface.a);
         c.group_box_foreground = hsla(p.text_primary);
-        c.popover = hsla(p.surface);
+        // 浮层用实体形态：贴在正文上方的菜单和弹层不能跟着背景一起变虚。
+        c.popover = tinted(p.surface, g.overlay.a);
         c.popover_foreground = hsla(p.text_primary);
-        c.list = hsla(p.surface);
-        c.list_even = hsla(p.background_secondary);
-        c.list_hover = hsla(p.surface_hover);
-        c.list_active = hsla(p.surface_hover);
+        c.list = tinted(p.surface, g.surface.a);
+        c.list_even = tinted(p.background_secondary, g.surface_strong.a);
+        c.list_hover = tinted(p.surface_hover, g.surface.a + 0.12);
+        c.list_active = tinted(p.surface_hover, g.surface.a + 0.12);
         c.list_active_border = hsla(accent);
-        c.list_head = hsla(p.background_secondary);
-        c.title_bar = hsla(p.background_secondary);
+        c.list_head = tinted(p.background_secondary, g.surface_strong.a);
+        c.title_bar = tinted(p.background_secondary, g.surface_strong.a);
         c.title_bar_border = hsla(p.border);
-        c.status_bar = hsla(p.background_secondary);
-        c.tab_bar = hsla(p.background_secondary);
-        c.tab = hsla(p.surface);
-        c.tab_active = hsla(p.surface_hover);
+        c.status_bar = tinted(p.background_secondary, g.surface_strong.a);
+        c.tab_bar = tinted(p.background_secondary, g.surface_strong.a);
+        c.tab = tinted(p.surface, g.surface.a);
+        c.tab_active = tinted(p.surface_hover, g.surface.a + 0.12);
         c.tab_foreground = hsla(p.text_secondary);
         c.tab_active_foreground = hsla(p.text_primary);
 
@@ -248,9 +271,9 @@ pub fn set_appearance(cx: &mut App, appearance: Appearance) {
 
         c.border = hsla(p.border);
         c.ring = hsla(accent);
-        c.selection = hsla(p.surface_hover);
+        c.selection = tinted(p.surface_hover, g.surface.a + 0.12);
         c.caret = hsla(p.text_primary);
-        c.scrollbar = hsla(p.background);
+        c.scrollbar = tinted(p.background, 0.);
         c.scrollbar_thumb = hsla(p.border);
         c.scrollbar_thumb_hover = hsla(p.text_secondary);
 
@@ -258,7 +281,7 @@ pub fn set_appearance(cx: &mut App, appearance: Appearance) {
         c.primary_foreground = hsla(p.on_accent);
         c.primary_hover = hsla(p.accent_hover);
         c.primary_active = hsla(p.accent_hover);
-        c.accent = hsla(p.surface_hover);
+        c.accent = tinted(p.surface_hover, g.surface.a + 0.12);
         c.accent_foreground = hsla(p.text_primary);
         c.link = hsla(p.text_primary);
         c.link_hover = hsla(p.accent_hover);
@@ -279,17 +302,17 @@ pub fn set_appearance(cx: &mut App, appearance: Appearance) {
         c.info_active = hsla(p.accent_hover);
 
         // 组件库的 `button_*` 是独立字段，不会回落到 `primary`。
-        c.button = hsla(p.surface_hover);
-        c.button_hover = hsla(p.border);
-        c.button_active = hsla(p.border);
+        c.button = tinted(p.surface_hover, g.surface.a + 0.12);
+        c.button_hover = tinted(p.border, g.surface.a + 0.30);
+        c.button_active = tinted(p.border, g.surface.a + 0.30);
         c.button_foreground = hsla(p.text_primary);
         c.button_primary = hsla(p.accent);
         c.button_primary_hover = hsla(p.accent_hover);
         c.button_primary_active = hsla(p.accent_hover);
         c.button_primary_foreground = hsla(p.on_accent);
-        c.button_secondary = hsla(p.surface_hover);
-        c.button_secondary_hover = hsla(p.border);
-        c.button_secondary_active = hsla(p.border);
+        c.button_secondary = tinted(p.surface_hover, g.surface.a + 0.12);
+        c.button_secondary_hover = tinted(p.border, g.surface.a + 0.30);
+        c.button_secondary_active = tinted(p.border, g.surface.a + 0.30);
         c.button_secondary_foreground = hsla(p.text_primary);
         c.button_danger = hsla(p.danger);
         c.button_danger_hover = hsla(p.danger);
@@ -308,9 +331,9 @@ pub fn set_appearance(cx: &mut App, appearance: Appearance) {
         c.button_warning_active = hsla(p.warning);
         c.button_warning_foreground = hsla(p.on_accent);
 
-        c.secondary = hsla(p.surface_hover);
-        c.secondary_hover = hsla(p.border);
-        c.secondary_active = hsla(p.border);
+        c.secondary = tinted(p.surface_hover, g.surface.a + 0.12);
+        c.secondary_hover = tinted(p.border, g.surface.a + 0.30);
+        c.secondary_active = tinted(p.border, g.surface.a + 0.30);
         c.secondary_foreground = hsla(p.text_primary);
 
         // 开关与选中态用主题色：界面上唯一允许出现的彩色。

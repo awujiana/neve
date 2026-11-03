@@ -101,6 +101,17 @@
   </tr>
 </table>
 
+窗口底色是带 alpha 的薄纱，后面是系统合成的真实桌面模糊，能直接看见下方的应用与壁纸：
+
+<table align="center">
+  <tr>
+    <td align="center">
+      <img src="docs/screenshots/transparency-glass.png" alt="窗口透出后方内容" width="100%">
+      <br><sub><b>Névé 盖在四块纯色窗口上：底色透出后方内容</b></sub>
+    </td>
+  </tr>
+</table>
+
 > 截图为当前开发版本实拍，随界面迭代可能变化。
 
 ## 📦 快速开始

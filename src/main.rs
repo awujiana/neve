@@ -8,25 +8,13 @@
 mod core;
 mod ui;
 
-use core::appearance::{Appearance, Material};
+use core::appearance::Appearance;
 use core::players::detect_players;
 
 use gpui_kit::{
-    App, AppContext as _, Bounds, TitlebarOptions, WindowBackgroundAppearance, WindowBounds,
-    WindowOptions, application, init, open_window, px, size,
+    App, AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowOptions, application, init,
+    open_window, px, size,
 };
-
-/// 材质到窗口背景外观的映射。
-///
-/// Windows 平台下 `Blurred` 走 `ACCENT_ENABLE_ACRYLICBLURBEHIND`（DWM 亚克力），
-/// `Transparent` 走透明渐变，`Off` 关闭合成——这就是「窗口材质」的真正实现。
-fn window_background(material: Material) -> WindowBackgroundAppearance {
-    match material {
-        Material::Off | Material::CustomImage => WindowBackgroundAppearance::Opaque,
-        Material::Transparent => WindowBackgroundAppearance::Transparent,
-        Material::Acrylic | Material::Blur => WindowBackgroundAppearance::Blurred,
-    }
-}
 
 fn main() {
     // TODO: 移入后台线程；当前同步执行（目录扫描深度受限，通常 < 1s）
@@ -42,7 +30,7 @@ fn main() {
     let panels = ui::build_panels(&players);
     // 外观设置持久化在数据目录，读不到就用默认值。
     let appearance = Appearance::load();
-    let background = window_background(appearance.material);
+    let background = ui::window_background(appearance.material);
 
     application().run(move |cx: &mut App| {
         // 组件库初始化必须在任何组件使用之前

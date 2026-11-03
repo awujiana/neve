@@ -47,6 +47,8 @@
    - 禁止绕过 `gpui-kit` 单依赖入口直接引入 `gpui` / `gpui-component` 其它版本——`gpui-pre` / `gpui-fast` 在 crates.io 不含原生平台实现，版本矩阵一乱就编译不过。
    - `src/core/` 内禁止 `use gpui_kit::*`，core 层必须可脱离 GUI 单测。
    - **界面风格是液态玻璃，不许改成扁平 / 不透明**。卡片一律用 `ui::card()` 或 `ui::theme::glass(cx)` 取材质，禁止在页面里直接写 `rgb()` / 不透明背景色。
+   - **玻璃必须真的透**：改任何背景相关代码都要沿「背景链」逐层确认没有实色铺底——组件库 `Root` 会用 `theme.tokens.background` 给**整窗**刷一层底色，只要它是实色，窗口层的亚克力就完全看不见，界面会退化成一块黑板。清掉它的办法是在 `ui::theme::set_appearance` 里把 `colors.background` 设为全透明，窗口底色改由我们自己的根容器画带 alpha 的渐变。验证方式见 `scripts/probe_transparency.py`。
+   - **次级文字不能压太暗**：玻璃底下会透出任意颜色的桌面，中性灰（`text_secondary`）压到 `#8a8a92` 一档时，落在高饱和背景上就读不出来了。
    - **不要用大半径阴影做柔光**。GPUI 的模糊采样精度不足，`blur_radius` 到几百像素会出现多边形棱边与网格接缝；背景光斑统一走 `ui::glow()`（多层同心圆 + 收敛衰减）。
    - 不要把窗口控制按钮换回组件库的 `TitleBar`：其按钮依赖 SVG 资源，资源缺失时整块区域不可见。
 4. **README 风格**：顶部 shields.io 徽章（`<p align="center">` 纯 HTML 居中）→ 双名标题 → 语言切换徽章 + 文档导航 → `[!WARNING]` AI 声明 → 目录 → 正文 → 底部三节（关联仓库 / 作者联系方式 / 开源协议）。
