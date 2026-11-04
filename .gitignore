@@ -17,3 +17,16 @@ desktop.ini
 # 日志与临时文件
 *.log
 *.tmp
+
+# 界面验证脚本的临时截图（probe_drag / probe_contrast / 手工抓图）
+/_probe-*.png
+/_shot-*.png
+/_crop*.png
+
+# 液态玻璃调研资料：第三方项目源码与压缩包，各自带原协议且体积较大，不入库。
+# 来源与调研结论见 docs/液态玻璃组件库.md §2 / §11。
+/docs/yzrt-master/
+/docs/yzrt-master.zip
+/docs/AndroidLiquidGlass-2.0.0-alpha03/
+/docs/AndroidLiquidGlass-2.0.0-alpha03.zip
+/docs/源码.js

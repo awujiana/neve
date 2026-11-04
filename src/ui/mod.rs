@@ -6,6 +6,7 @@
 //!
 //! 视图模型与交互动作在此聚合；core 层只提供纯逻辑与文件操作。
 
+pub mod glass;
 mod theme;
 
 use std::path::{Path, PathBuf};
@@ -224,10 +225,12 @@ enum Page {
     Configs,
     Backup,
     Settings,
+    /// 玻璃实验室：实时调参 + 五种预设的对照展示。
+    GlassLab,
 }
 
 impl Page {
-    const ALL: [Page; 7] = [
+    const ALL: [Page; 8] = [
         Page::Overview,
         Page::Players,
         Page::Scripts,
@@ -235,6 +238,7 @@ impl Page {
         Page::Configs,
         Page::Backup,
         Page::Settings,
+        Page::GlassLab,
     ];
 
     fn label(self) -> &'static str {
@@ -246,6 +250,7 @@ impl Page {
             Page::Configs => "配置",
             Page::Backup => "备份与同步",
             Page::Settings => "设置",
+            Page::GlassLab => "玻璃实验室",
         }
     }
 
@@ -259,6 +264,7 @@ impl Page {
             Page::Configs => "mpv.conf、input.conf 与脚本配置的冲突清单。",
             Page::Backup => "写入前的备份批次与恢复入口。",
             Page::Settings => "外观、语言、音效、托盘、数据位置与系统集成。",
+            Page::GlassLab => "实时调整液态玻璃参数，并对照五种预设的渲染结果。",
         }
     }
 
@@ -277,6 +283,87 @@ impl Page {
                 Some("备份记录已落盘（backups/<操作>/<时间戳>/），浏览与批量恢复随 M4 接入。")
             }
             Page::Settings => Some("外观定制（FR-04）与系统集成（FR-06）随 M4 接入。"),
+            Page::GlassLab => None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 玻璃实验室参数
+// ---------------------------------------------------------------------------
+
+/// 实验室里可调的四个量。用枚举而不是闭包，是因为 `cx.listener` 要求
+/// 捕获的东西 `'static + Copy`，函数指针/setter 混着写反而绕。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum GlassParam {
+    RefractionHeight,
+    RefractionAmount,
+    Frost,
+    Dispersion,
+}
+
+impl GlassParam {
+    const ALL: [Self; 4] = [
+        Self::RefractionHeight,
+        Self::RefractionAmount,
+        Self::Frost,
+        Self::Dispersion,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::RefractionHeight => "折射带宽度",
+            Self::RefractionAmount => "折射强度",
+            Self::Frost => "磨砂",
+            Self::Dispersion => "色散",
+        }
+    }
+
+    fn hint(self) -> &'static str {
+        match self {
+            Self::RefractionHeight => "边缘亮线的偏移 / 厚度",
+            Self::RefractionAmount => "边缘亮线的条数与亮度",
+            Self::Frost => "面层实度，越大越不透",
+            Self::Dispersion => "边缘冷暖彩边",
+        }
+    }
+
+    fn range(self) -> (f32, f32) {
+        match self {
+            Self::RefractionHeight => (0., 32.),
+            _ => (0., 1.),
+        }
+    }
+
+    fn step(self) -> f32 {
+        match self {
+            Self::RefractionHeight => 1.,
+            _ => 0.01,
+        }
+    }
+
+    fn read(self, spec: &glass::GlassSpec) -> f32 {
+        match self {
+            Self::RefractionHeight => spec.refraction_height,
+            Self::RefractionAmount => spec.refraction_amount,
+            Self::Frost => spec.frost,
+            Self::Dispersion => spec.dispersion,
+        }
+    }
+
+    fn write(self, spec: &mut glass::GlassSpec, value: f32) {
+        match self {
+            Self::RefractionHeight => spec.refraction_height = value,
+            Self::RefractionAmount => spec.refraction_amount = value,
+            Self::Frost => spec.frost = value,
+            Self::Dispersion => spec.dispersion = value,
+        }
+    }
+
+    fn display(self, value: f32) -> String {
+        match self {
+            Self::RefractionHeight => format!("{value:.0} px"),
+            _ => format!("{:.0}%", value * 100.),
         }
     }
 }
@@ -287,38 +374,16 @@ impl Page {
 
 /// 卡片容器：液态玻璃材质。
 ///
-/// 依据规范 §4.1，玻璃由四层构成，GPUI 无背景模糊，故用以下组合实现：
-/// 1. 半透明填充（`Glass::surface`）—— 透出底层渐变，形成材质感；
-/// 2. 1px 亮边（`Glass::highlight`）—— 边缘折射高光；
-/// 3. 内侧 inset 阴影 —— 顶部内侧一条细亮线，这是液态玻璃最关键的读感；
-/// 4. 向下的柔和投影 —— 把卡片从背景层抬起。
+/// 页面的薄封装：挑常规预设、取当前令牌，剩下交给 `ui::glass`。
+/// 玻璃的四层（斜向渐变底 / 外缘描边 / 对称 inset 亮边 / 向下投影）与
+/// 依据规范 §4.1 的取舍都写在 `src/ui/glass/resolve.rs` 和
+/// `docs/液态玻璃组件库.md`，页面不再重复拼装。
 fn card(cx: &App) -> Div {
+    // 玻璃的四层（渐变底 / 亮边 / inset 高光 / 投影）统一由组件库解析，
+    // 页面不再自己拼 BoxShadow；这里只负责挑参数与取令牌。
     let g = theme::current_glass(cx);
-    v_flex()
-        .gap_3()
-        .p_4()
-        .rounded(px(theme::RADIUS_PANEL))
-        .bg(g.surface)
-        .border_1()
-        .border_color(g.outline)
-        .shadow(vec![
-            // 皮肤的投影很收敛（blur 4），这里放大到 24 是因为卡片本身很大，
-            // 否则浮不起来；透明度同步压低，避免发灰。
-            BoxShadow {
-                color: g.shadow,
-                offset: point(px(0.), px(8.)),
-                blur_radius: px(24.),
-                spread_radius: px(-6.),
-                inset: false,
-            },
-            BoxShadow {
-                color: g.highlight,
-                offset: point(px(0.), px(1.5)),
-                blur_radius: px(2.),
-                spread_radius: px(0.),
-                inset: true,
-            },
-        ])
+    let ratio = theme::appearance(cx).lightness_ratio();
+    glass::card(&glass::GlassSpec::regular(), &g, ratio)
 }
 
 /// 滑杆值（0..100 的 f32）落到 `u8` 百分比上。
@@ -557,6 +622,10 @@ pub struct AppShell {
     opacity_slider: Entity<SliderState>,
     /// 「明暗」滑杆状态。
     lightness_slider: Entity<SliderState>,
+    /// 玻璃实验室当前参数：只影响实验室预览，不改全局外观，也不落盘。
+    glass_spec: glass::GlassSpec,
+    /// 当前选中的预设；微调参数后变成 `None`（自定义）。
+    glass_preset: Option<glass::GlassPreset>,
 }
 
 impl AppShell {
@@ -605,6 +674,8 @@ impl AppShell {
             open_menu: None,
             opacity_slider,
             lightness_slider,
+            glass_spec: glass::GlassSpec::regular(),
+            glass_preset: Some(glass::GlassPreset::Regular),
         }
     }
 
@@ -2227,6 +2298,170 @@ impl AppShell {
         body.into_any_element()
     }
 
+    /// 按步进调整实验室参数，并把预设标记为「自定义」。
+    fn adjust_glass(&mut self, param: GlassParam, delta: f32) {
+        let (min, max) = param.range();
+        let value = (param.read(&self.glass_spec) + delta).clamp(min, max);
+        param.write(&mut self.glass_spec, value);
+        self.glass_preset = None;
+    }
+
+    /// 玻璃实验室：五种预设对照 + 四个参数的实时步进调节。
+    ///
+    /// 刻意只做「预览」：参数不写进 `appearance`，也不改全局 `ui::card()`，
+    /// 免得把实验室里调过头的高色散带到整个界面上。
+    fn render_glass_lab(&self, cx: &mut Context<Self>) -> AnyElement {
+        let t = cx.theme();
+        let g = theme::current_glass(cx);
+        let ratio = self.appearance.lightness_ratio();
+        let fg = t.colors.foreground;
+        // 实测：近白玻璃面板上 muted_foreground 只有 3.06:1，AA 正文要 4.5:1。
+        // 本页说明文字统一用主色，层级靠字号 / 字重区分（同 AGENTS.md 的既有做法）。
+        let regular = glass::GlassSpec::regular();
+
+        // 预设选择行。
+        // 用组件库的 panel / pill / surface / preset_card 各搭一处，
+        // 实验室同时也是组件库四个入口的活示例。
+        let mut preset_row = glass::panel(&regular, &g, ratio).gap_2().p_2();
+        for (index, preset) in glass::GlassPreset::ALL.iter().enumerate() {
+            let preset = *preset;
+            let selected = self.glass_preset == Some(preset);
+            let id = SharedString::from(format!("glass-preset-{index}"));
+            let button = Button::new(id)
+                .label(preset.label())
+                .with_size(Size::Small)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.glass_preset = Some(preset);
+                    this.glass_spec = preset.spec();
+                    cx.notify();
+                }));
+            preset_row = preset_row.child(if selected { button.primary() } else { button });
+        }
+        let preset_card = glass::preset_card(glass::GlassPreset::Regular, &g, ratio)
+            .gap_2()
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(fg)
+                    .child("材质预设"),
+            )
+            .child(preset_row)
+            .child(
+                div().text_xs().text_color(fg).child(
+                    self.glass_preset
+                        .map(glass::GlassPreset::description)
+                        .unwrap_or("在当前参数上手动微调，未对应任何预设。"),
+                ),
+            );
+
+        // 实时预览：这块卡用当前调出来的 spec 渲染。
+        let layers = glass::resolve::resolve(&self.glass_spec, &g, ratio);
+        let preview = glass::card(&self.glass_spec, &g, ratio)
+            .min_h(px(160.))
+            .justify_center()
+            .gap_2()
+            .child(
+                div()
+                    .text_lg()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(fg)
+                    .child("液态玻璃预览"),
+            )
+            .child(div().text_xs().text_color(fg).child(format!(
+                "边缘 {} 层 · 高光角 {:.0}° · 面层 alpha {:.2}",
+                layers.shadows.len(),
+                layers.gradient_angle,
+                layers.gradient_start.a,
+            )))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(fg)
+                    .child("背景由窗口层的系统合成提供，玻璃本身只画表面与边缘。"),
+            );
+
+        // 参数步进：每格 1px 或 1%，与设置页滑杆的 1% 精度一致。
+        let mut param_rows = v_flex().gap_2();
+        for (index, param) in GlassParam::ALL.iter().enumerate() {
+            let param = *param;
+            let value = param.read(&self.glass_spec);
+            let dec = Button::new(SharedString::from(format!("glass-dec-{index}")))
+                .label("−")
+                .with_size(Size::Small)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.adjust_glass(param, -param.step());
+                    cx.notify();
+                }));
+            let inc = Button::new(SharedString::from(format!("glass-inc-{index}")))
+                .label("+")
+                .with_size(Size::Small)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.adjust_glass(param, param.step());
+                    cx.notify();
+                }));
+            param_rows = param_rows.child(
+                h_flex()
+                    .items_center()
+                    .gap_3()
+                    .py_1()
+                    .child(
+                        div()
+                            .w(px(96.))
+                            .text_xs()
+                            .text_color(fg)
+                            .child(param.label()),
+                    )
+                    .child(
+                        div()
+                            .w(px(190.))
+                            .text_xs()
+                            .text_color(fg)
+                            .child(param.hint()),
+                    )
+                    .child(
+                        glass::pill(&glass::GlassSpec::vibrant(), &g, ratio).child(
+                            div()
+                                .w(px(64.))
+                                .text_xs()
+                                .text_color(fg)
+                                .child(param.display(value)),
+                        ),
+                    )
+                    .child(dec)
+                    .child(inc),
+            );
+        }
+        let param_card = glass::card(&regular, &g, ratio)
+            .gap_2()
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(fg)
+                    .child("参数（每格 1px / 1%）"),
+            )
+            .child(param_rows);
+
+        // 说明直接落在半透窗口底色上，按 AGENTS.md 的对比度约定用主色。
+        v_flex()
+            .gap_4()
+            .child(preset_card)
+            .child(preview)
+            .child(param_card)
+            .child(
+                glass::surface(&glass::GlassSpec::frosted(), &g, ratio)
+                    .p_3()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(fg)
+                            .child("参数模型取自 WebGL 折射、iOS 私有玻璃滤镜、Android Backdrop、纯 CSS 多重内高光与油猴脚本的模糊配方；GPUI 没有自定义 shader 与背景模糊，边缘以对称 inset 亮边近似。详见 docs/液态玻璃组件库.md。"),
+                    ),
+            )
+            .into_any_element()
+    }
+
     fn render_pending(&self, cx: &mut Context<Self>) -> AnyElement {
         let page = self.page;
         let hint = page.milestone().unwrap_or("该模块尚未接入。");
@@ -2345,6 +2580,7 @@ impl Render for AppShell {
             Page::Overview => self.render_overview(cx),
             Page::Players => self.render_players(cx),
             Page::Settings => self.render_settings(cx),
+            Page::GlassLab => self.render_glass_lab(cx),
             _ => self.render_pending(cx),
         };
         let top_bar = self.render_title_bar(window, cx);
@@ -2357,7 +2593,7 @@ impl Render for AppShell {
         let t = cx.theme();
         let g = theme::current_glass(cx);
 
-        // 背景层：斜向渐变 + 两处柔和光斑。
+        // 背景层：只有一层斜向渐变（角部装饰光斑已移除，见 AGENTS.md）。
         // 背景整体带 alpha：材质为透明/亚克力时窗口层已开启系统合成，
         // 这里留出透明度，桌面内容才能真的透进来。
         let background = linear_gradient(

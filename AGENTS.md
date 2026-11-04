@@ -25,6 +25,7 @@
 | `src/core/store.rs` | 数据目录定位（便携版优先） | ✅ |
 | `src/ui/mod.rs` | 页面骨架、侧栏、概览页、播放器页与交互动作 | ✅ |
 | `src/ui/theme.rs` | 设计令牌 → `ThemeColor` 语义槽位的投影 | ✅ |
+| `src/ui/glass/` | 液态玻璃组件库：参数(`spec`) / 解析(`resolve`) / 组件(`surface`) 三层 | ✅ |
 | `docs/` | 设计文档、架构文档、UI 规范、质量门禁、`screenshots/` | ✅ |
 | `config/ui-theme.toml` | 主题令牌的设计基线（运行时取值固化在 `ui/theme.rs`） | ✅ |
 | `scripts/` | `update_badges.py`（徽章生成）、`badges.config.json`（唯一数据源） | ✅ |
@@ -46,7 +47,8 @@
    - 禁止 `unwrap()` / `expect()` / `panic!` / `todo!()` / `unimplemented!()` / `dbg!()`；用 `?`、`let ... else`、`Option` 组合子替代，确实必要时写 `#[expect(..., reason = "…")]`。
    - 禁止绕过 `gpui-kit` 单依赖入口直接引入 `gpui` / `gpui-component` 其它版本——`gpui-pre` / `gpui-fast` 在 crates.io 不含原生平台实现，版本矩阵一乱就编译不过。
    - `src/core/` 内禁止 `use gpui_kit::*`，core 层必须可脱离 GUI 单测。
-   - **界面风格是液态玻璃，不许改成扁平 / 不透明**。卡片一律用 `ui::card()` 或 `ui::theme::glass(cx)` 取材质，禁止在页面里直接写 `rgb()` / 不透明背景色。
+   - **界面风格是液态玻璃，不许改成扁平 / 不透明**。卡片一律用 `ui::card()`（内部走 `ui::glass::card`）或 `ui::theme::glass(cx)` 取材质，禁止在页面里直接写 `rgb()` / 不透明背景色，也不要再手拼 `BoxShadow` 玻璃层——参数与分层统一由 `src/ui/glass/` 负责。
+   - **组件库的参数层不含颜色**：`GlassSpec` / `GlassPreset` 只有数值，颜色一律在 `resolve.rs` 从 `theme::Glass` 令牌派生。给参数层加颜色常量会绕过语义色投影，也会破坏半透背景链（实色一铺，窗口层亚克力就看不见了）。新增玻璃能力先读 `docs/液态玻璃组件库.md` §3 的 GPUI 能力边界。
    - **玻璃必须真的透**：改任何背景相关代码都要沿「背景链」逐层确认没有实色铺底——组件库 `Root` 会用 `theme.tokens.background` 给**整窗**刷一层底色，只要它是实色，窗口层的亚克力就完全看不见，界面会退化成一块黑板。清掉它的办法是在 `ui::theme::set_appearance` 里把 `colors.background` 设为全透明，窗口底色改由我们自己的根容器画带 alpha 的渐变。验证方式见 `scripts/probe_transparency.py`。
    - **次级文字不能压太暗**：玻璃底下会透出任意颜色的桌面，中性灰（`text_secondary`）压到 `#8a8a92` 一档时，落在高饱和背景上就读不出来了。
    - **不要给背景加装饰光斑**。曾经用 `ui::glow()`（64 层同心圆叠径向衰减）在右上/左下放两处柔光，实测在半透底上会显出圆形轮廓，已整体移除；背景只保留一层斜向渐变。GPUI 也没有径向渐变与大半径模糊（`blur_radius` 几百像素会因采样精度不足出现多边形棱边），别再尝试这条路。

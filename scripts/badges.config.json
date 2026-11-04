@@ -17,6 +17,7 @@
   ],
   "docs": [
     { "label": "文档索引", "href": "docs/设计文档.md" },
+    { "label": "液态玻璃组件库", "href": "docs/液态玻璃组件库.md" },
     { "label": "贡献指南", "href": "CONTRIBUTING.md" },
     { "label": "更新日志", "href": "CHANGELOG.md" },
     { "label": "多语言支持", "href": "#多语言支持" }

@@ -22,7 +22,7 @@
 </p>
 
 <p align="center">
-  <sub>文档 / Docs：<a href="docs/设计文档.md">文档索引</a> · <a href="CONTRIBUTING.md">贡献指南</a> · <a href="CHANGELOG.md">更新日志</a> · <a href="#多语言支持">多语言支持</a></sub>
+  <sub>文档 / Docs：<a href="docs/设计文档.md">文档索引</a> · <a href="docs/液态玻璃组件库.md">液态玻璃组件库</a> · <a href="CONTRIBUTING.md">贡献指南</a> · <a href="CHANGELOG.md">更新日志</a> · <a href="#多语言支持">多语言支持</a></sub>
 </p>
 <!-- language-nav:end -->
 
@@ -112,6 +112,17 @@
   </tr>
 </table>
 
+`ui::glass` 组件库把玻璃收成「参数 → 解析 → 组件」三层，侧栏「玻璃实验室」可以实时调折射 / 磨砂 / 色散并对照五种预设（API 与取舍见[组件库文档](docs/液态玻璃组件库.md)）：
+
+<table align="center">
+  <tr>
+    <td align="center">
+      <img src="docs/screenshots/glass-lab.png" alt="玻璃实验室" width="100%">
+      <br><sub><b>玻璃实验室 · 预设与参数实时预览</b></sub>
+    </td>
+  </tr>
+</table>
+
 > 截图为当前开发版本实拍，随界面迭代可能变化。
 
 ## 📦 快速开始
@@ -145,6 +156,7 @@ cargo test
 
 - [设计文档（PRD）](docs/设计文档.md) —— 需求、用户故事、验收标准、里程碑
 - [架构文档](docs/架构文档.md) —— 分层架构、模块划分、数据存储、关键流程、风险
+- [液态玻璃组件库](docs/液态玻璃组件库.md) —— `ui::glass` 的参数模型、API、五份参考的取舍与接入示例
 - [UI 设计规范](docs/UI设计规范.md) —— 页面结构、视觉语言、昼夜主题切换与交互原则
 - [Rust 代码风格与质量门禁](docs/Rust代码风格与质量门禁.md) —— 强制格式、API 设计、所有权习惯与 CI 合并门禁
 - [主题令牌配置](config/ui-theme.toml) —— 主题色、玻璃表面、动效与无障碍基线（已投影到运行时语义色）
