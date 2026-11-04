@@ -5,5 +5,6 @@
 
 pub mod conf;
 pub mod conflicts;
+pub mod document;
 pub mod input;
 pub mod report;

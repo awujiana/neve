@@ -384,8 +384,8 @@ fn find_config_dir(exe_path: &Path) -> Option<PathBuf> {
     None
 }
 
-/// 惰性版本探测：运行 `exe --version` 并解析首行（阻塞操作，勿在 UI 线程批量调用）
-#[expect(dead_code, reason = "供播放器详情页按需探测版本使用")]
+/// 惰性版本探测：运行 `exe --version` 并解析首行（阻塞操作，勿在 UI 线程批量调用）。
+/// 只在用户点击「探测版本」时调用一次。
 pub fn probe_version(exe_path: &Path) -> Option<String> {
     let output = Command::new(exe_path).arg("--version").output().ok()?;
     if !output.status.success() {
@@ -394,6 +394,45 @@ pub fn probe_version(exe_path: &Path) -> Option<String> {
     let output_text = String::from_utf8_lossy(&output.stdout);
     let first = output_text.lines().next()?.trim();
     (!first.is_empty()).then(|| first.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// 播放器管理动作（由 UI 的按钮触发；不做静默写操作）
+// ---------------------------------------------------------------------------
+
+/// 用系统文件管理器打开配置目录，方便用户在外部编辑器里改配置。
+pub fn open_directory(path: &Path) -> Result<(), String> {
+    if !path.is_dir() {
+        return Err(format!("目录不存在：{}", path.display()));
+    }
+    let spawned = {
+        #[cfg(windows)]
+        {
+            Command::new("explorer").arg(path).spawn()
+        }
+        #[cfg(target_os = "macos")]
+        {
+            Command::new("open").arg(path).spawn()
+        }
+        #[cfg(all(not(windows), not(target_os = "macos")))]
+        {
+            Command::new("xdg-open").arg(path).spawn()
+        }
+    };
+    spawned
+        .map(|_| ())
+        .map_err(|error| format!("无法打开目录 {}：{error}", path.display()))
+}
+
+/// 启动播放器本体（不附加媒体文件）。
+pub fn launch_player(exe_path: &Path) -> Result<(), String> {
+    if !exe_path.is_file() {
+        return Err(format!("播放器不存在：{}", exe_path.display()));
+    }
+    Command::new(exe_path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("无法启动 {}：{error}", exe_path.display()))
 }
 
 #[cfg(test)]
@@ -413,5 +452,12 @@ mod tests {
     fn detect_players_runs() {
         // 冒烟测试：只要求不 panic
         let _ = detect_players();
+    }
+
+    #[test]
+    fn management_actions_reject_missing_paths() {
+        // 不真的启动资源管理器 / 播放器，只验证前置检查会挡住错误路径。
+        assert!(open_directory(Path::new("Z:/definitely-missing-neve")).is_err());
+        assert!(launch_player(Path::new("Z:/definitely-missing-neve/mpv.exe")).is_err());
     }
 }

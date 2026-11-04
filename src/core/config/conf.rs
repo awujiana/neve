@@ -28,7 +28,12 @@ pub struct ConfEntry {
 /// conf 文档：行序、注释、空行全部保留
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ConfDoc {
+    /// 结构化判定（语义层）：供 `entries()` / `get()` / 冲突检测使用。
     lines: Vec<ConfLine>,
+    /// 每行原文（去掉行尾 `\r`）。渲染以它为准，才能真正做到字节级往返：
+    /// 真实整合包配置普遍带缩进注释、对齐空格与行尾空格，从 `lines` 重新拼
+    /// 一行必然把这些空白丢掉。`set_key` 会同步更新被改的那一行。
+    raw_lines: Vec<String>,
     /// 源文本是否使用 CRLF 行尾（渲染时按此还原）
     crlf: bool,
     /// 源文本是否以换行结尾
@@ -40,10 +45,13 @@ impl ConfDoc {
     pub fn parse(text: &str) -> Self {
         let crlf = text.contains("\r\n");
         let trailing_newline = text.ends_with('\n');
-        let lines = text
+        let raw_lines: Vec<String> = text
             .lines()
-            .map(|raw| {
-                let line = raw.trim_end_matches('\r');
+            .map(|raw| raw.trim_end_matches('\r').to_string())
+            .collect();
+        let lines = raw_lines
+            .iter()
+            .map(|line| {
                 let trimmed = line.trim();
                 if trimmed.is_empty() {
                     ConfLine::Blank
@@ -64,6 +72,7 @@ impl ConfDoc {
             .collect();
         Self {
             lines,
+            raw_lines,
             crlf,
             trailing_newline,
         }
@@ -96,10 +105,11 @@ impl ConfDoc {
         })
     }
 
-    /// 修改键值：更新最后一次出现的位置（保持 mpv 生效语义），不存在则追加
-    #[allow(dead_code)] // TODO(M2-UI): 配置编辑器 UI 接入后移除此属性
+    /// 修改键值：更新最后一次出现的位置（保持 mpv 生效语义），不存在则追加。
+    ///
+    /// 只重写被改的那一行的原文，其余行（含注释、缩进、对齐空格）原样不动。
     pub fn set_key(&mut self, key: &str, value: &str) -> bool {
-        for line in self.lines.iter_mut().rev() {
+        for (idx, line) in self.lines.iter_mut().enumerate().rev() {
             if let ConfLine::Entry {
                 key: existing_key,
                 value: existing_value,
@@ -107,6 +117,9 @@ impl ConfDoc {
                 && existing_key == key
             {
                 *existing_value = value.to_string();
+                if let Some(raw) = self.raw_lines.get_mut(idx) {
+                    *raw = format!("{key}={value}");
+                }
                 return true;
             }
         }
@@ -114,22 +127,14 @@ impl ConfDoc {
             key: key.to_string(),
             value: value.to_string(),
         });
+        self.raw_lines.push(format!("{key}={value}"));
         false
     }
 
     /// 渲染回文本（与源文本逐字节一致，除非行尾风格被统一）
     pub fn render(&self) -> String {
         let sep = if self.crlf { "\r\n" } else { "\n" };
-        let mut out = self
-            .lines
-            .iter()
-            .map(|line| match line {
-                ConfLine::Entry { key, value } => format!("{key}={value}"),
-                ConfLine::Comment(text) | ConfLine::Verbatim(text) => text.clone(),
-                ConfLine::Blank => String::new(),
-            })
-            .collect::<Vec<_>>()
-            .join(sep);
+        let mut out = self.raw_lines.join(sep);
         if self.trailing_newline {
             out.push_str(sep);
         }
@@ -195,5 +200,34 @@ mod tests {
         let mut doc = ConfDoc::parse("# only comment\n");
         assert!(!doc.set_key("vo", "gpu"));
         assert_eq!(doc.get("vo"), Some("gpu".to_string()));
+    }
+
+    /// 真实整合包配置的常见形态：缩进注释、对齐空格、行尾空格、行尾 `#` 说明。
+    const MESSY: &str = concat!(
+        "##  基本说明  \n",
+        "  # 缩进注释\n",
+        "\n",
+        "conf  =~~/files/mpv.conf   \n",
+        "vo=gpu-next        # 视频输出驱动\n",
+        "\t# 制表符注释\t\n",
+        "volume = 55\n",
+    );
+
+    #[test]
+    fn render_round_trip_messy_lf() {
+        assert_eq!(ConfDoc::parse(MESSY).render(), MESSY);
+    }
+
+    #[test]
+    fn render_round_trip_messy_crlf() {
+        let crlf = MESSY.replace('\n', "\r\n");
+        assert_eq!(ConfDoc::parse(&crlf).render(), crlf);
+    }
+
+    #[test]
+    fn set_key_leaves_other_lines_untouched() {
+        let mut doc = ConfDoc::parse(MESSY);
+        assert!(doc.set_key("volume", "80"));
+        assert_eq!(doc.render(), MESSY.replace("volume = 55", "volume=80"));
     }
 }

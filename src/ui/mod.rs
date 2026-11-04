@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
 use gpui_kit::component::switch::Switch;
@@ -30,8 +31,14 @@ use gpui_kit::MouseButton;
 use gpui_kit::component::InteractiveElementExt as _;
 
 use crate::core::backup::BackupManager;
+use crate::core::config::document::{
+    self, ConfigFileFormat, ConfigFileView, ConfigLineKind, ConfigLineView, EffectiveState,
+    PlayerConfigWorkspace,
+};
 use crate::core::config::report::PlayerConfigReport;
-use crate::core::players::{DetectedPlayer, detect_players};
+use crate::core::players::{
+    DetectedPlayer, detect_players, launch_player, open_directory, probe_version,
+};
 use crate::core::scripts::uosc::{
     UoscOptionValue, UoscStatus, install_uosc, read_uosc_values, uosc_status, update_uosc,
 };
@@ -261,7 +268,9 @@ impl Page {
             Page::Players => "所有使用 MPV 内核的播放器，及其配置目录与可管理内容。",
             Page::Scripts => "已安装脚本、依赖关系与跨包同步。",
             Page::Skins => "uosc 主题与 OSC 皮肤的预览和应用。",
-            Page::Configs => "mpv.conf、input.conf 与脚本配置的冲突清单。",
+            Page::Configs => {
+                "按原文逐行查看 mpv.conf、input.conf 与脚本选项，注释与生效关系一目了然。"
+            }
             Page::Backup => "写入前的备份批次与恢复入口。",
             Page::Settings => "外观、语言、音效、托盘、数据位置与系统集成。",
             Page::GlassLab => "实时调整液态玻璃参数，并对照五种预设的渲染结果。",
@@ -276,9 +285,7 @@ impl Page {
                 "启停开关、依赖扫描与跨包同步已可用，见「播放器」页。独立的脚本库视图随 M3 接入。",
             ),
             Page::Skins => Some("uosc 主题与 OSC 皮肤管理对应 FR-10，随 M3 接入。"),
-            Page::Configs => {
-                Some("冲突检测已接入「播放器」页的配置检查区；独立配置编辑器随 M3 接入。")
-            }
+            Page::Configs => None,
             Page::Backup => {
                 Some("备份记录已落盘（backups/<操作>/<时间戳>/），浏览与批量恢复随 M4 接入。")
             }
@@ -603,6 +610,16 @@ fn stat_card(value: impl Into<SharedString>, label: &'static str, hint: String, 
 // 主页面实体
 // ---------------------------------------------------------------------------
 
+/// 配置页正在编辑的一项。输入框状态必须由 `Entity<InputState>` 承载，
+/// 组件库要自己记录渲染后的 bounds 才能处理光标、选中与键盘事件。
+#[derive(Clone)]
+struct ConfigEdit {
+    player_idx: usize,
+    file_idx: usize,
+    key: String,
+    draft: Entity<InputState>,
+}
+
 pub struct AppShell {
     players: Vec<DetectedPlayer>,
     panels: Vec<PlayerPanel>,
@@ -626,6 +643,21 @@ pub struct AppShell {
     glass_spec: glass::GlassSpec,
     /// 当前选中的预设；微调参数后变成 `None`（自定义）。
     glass_preset: Option<glass::GlassPreset>,
+    /// 配置页：各播放器的工作区（与 `panels` 下标对齐）。
+    config_workspaces: Vec<PlayerConfigWorkspace>,
+    /// 配置页：当前播放器 / 文件下标。
+    config_player: usize,
+    config_file: usize,
+    /// 配置页：显示注释（含行尾说明与注释归属）。
+    config_show_comments: bool,
+    /// 配置页：只看配置项，隐藏注释与空行。
+    config_entries_only: bool,
+    /// 配置页：展开全部文件（script-opts 常有几十个）。
+    config_all_files: bool,
+    /// 配置页：展开超长文件的全部行。
+    config_all_lines: bool,
+    /// 配置页：正在编辑的项。
+    config_edit: Option<ConfigEdit>,
 }
 
 impl AppShell {
@@ -663,6 +695,12 @@ impl AppShell {
             });
         })
         .detach();
+        // 配置页与面板共用同一批检测结果；默认落在第一个真的有配置文件的播放器上。
+        let config_workspaces = document::build_workspaces(&players);
+        let config_player = config_workspaces
+            .iter()
+            .position(|workspace| !workspace.files.is_empty())
+            .unwrap_or(0);
         Self {
             players,
             panels,
@@ -676,13 +714,38 @@ impl AppShell {
             lightness_slider,
             glass_spec: glass::GlassSpec::regular(),
             glass_preset: Some(glass::GlassPreset::Regular),
+            config_workspaces,
+            config_player,
+            config_file: 0,
+            config_show_comments: true,
+            config_entries_only: false,
+            config_all_files: false,
+            config_all_lines: false,
+            config_edit: None,
         }
     }
 
-    /// 重新扫描全部播放器并刷新面板
+    /// 重新扫描全部播放器并刷新面板（含配置工作区，编辑后必须走这里重读盘）。
     fn refresh(&mut self) {
         self.players = detect_players();
         self.panels = build_panels(&self.players);
+        self.config_workspaces = document::build_workspaces(&self.players);
+        self.clamp_config_selection();
+    }
+
+    /// 播放器/文件数量变化后把下标收回到合法范围，避免切换页面时索引越界。
+    fn clamp_config_selection(&mut self) {
+        if self.config_player >= self.config_workspaces.len() {
+            self.config_player = 0;
+        }
+        let file_count = self
+            .config_workspaces
+            .get(self.config_player)
+            .map(|workspace| workspace.files.len())
+            .unwrap_or(0);
+        if self.config_file >= file_count {
+            self.config_file = 0;
+        }
     }
 
     fn config_dir_of(&self, idx: usize) -> Option<PathBuf> {
@@ -916,6 +979,177 @@ impl AppShell {
             ConflictPolicy::Overwrite => "冲突策略：覆盖",
             ConflictPolicy::KeepBoth => "冲突策略：保留双份",
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // 播放器管理与配置编辑动作
+    // -----------------------------------------------------------------------
+
+    /// 播放器页「查看配置」：重读盘后跳到对应播放器的配置工作区。
+    fn open_configs(&mut self, idx: usize, cx: &mut Context<Self>) {
+        self.refresh();
+        self.config_player = idx.min(self.config_workspaces.len().saturating_sub(1));
+        self.config_file = 0;
+        self.config_all_files = false;
+        self.config_all_lines = false;
+        self.config_edit = None;
+        let file_count = self
+            .config_workspaces
+            .get(self.config_player)
+            .map(|workspace| workspace.files.len())
+            .unwrap_or(0);
+        self.status = Some(StatusMessage::info(format!(
+            "正在查看 {} 的配置（{} 个文件）",
+            self.player_name(self.config_player),
+            file_count
+        )));
+        self.page = Page::Configs;
+        cx.notify();
+    }
+
+    fn open_player_config_dir(&mut self, idx: usize, cx: &mut Context<Self>) {
+        let Some(dir) = self.config_dir_of(idx) else {
+            self.status = Some(StatusMessage::warning("该播放器没有可用的配置目录"));
+            cx.notify();
+            return;
+        };
+        self.status = Some(match open_directory(&dir) {
+            Ok(()) => StatusMessage::success(format!("已打开 {}", dir.display())),
+            Err(error) => StatusMessage::error(error),
+        });
+        cx.notify();
+    }
+
+    fn launch_selected_player(&mut self, idx: usize, cx: &mut Context<Self>) {
+        let Some(exe) = self.players.get(idx).map(|player| player.exe_path.clone()) else {
+            return;
+        };
+        let name = self.player_name(idx);
+        self.status = Some(match launch_player(&exe) {
+            Ok(()) => StatusMessage::success(format!("已启动 {name}")),
+            Err(error) => StatusMessage::error(error),
+        });
+        cx.notify();
+    }
+
+    /// 版本探测要启动子进程，只在用户点击时做一次，不在扫描时批量跑。
+    fn probe_version_of(&mut self, idx: usize, cx: &mut Context<Self>) {
+        let Some(exe) = self.players.get(idx).map(|player| player.exe_path.clone()) else {
+            return;
+        };
+        let name = self.player_name(idx);
+        self.status = Some(match probe_version(&exe) {
+            Some(version) => {
+                if let Some(panel) = self.panels.get_mut(idx) {
+                    panel.version = Some(version.clone());
+                }
+                StatusMessage::success(format!("{name}：{version}"))
+            }
+            None => StatusMessage::warning(format!(
+                "{name}：未能读取版本（播放器可能不支持 --version）"
+            )),
+        });
+        cx.notify();
+    }
+
+    fn current_config_file(&self) -> Option<(&PlayerConfigWorkspace, &ConfigFileView)> {
+        let workspace = self.config_workspaces.get(self.config_player)?;
+        let file = workspace.files.get(self.config_file)?;
+        Some((workspace, file))
+    }
+
+    fn begin_config_edit(
+        &mut self,
+        player_idx: usize,
+        file_idx: usize,
+        key: String,
+        initial: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let draft = cx.new(|cx| InputState::new(window, cx).default_value(initial));
+        self.config_edit = Some(ConfigEdit {
+            player_idx,
+            file_idx,
+            key,
+            draft,
+        });
+        cx.notify();
+    }
+
+    fn cancel_config_edit(&mut self, cx: &mut Context<Self>) {
+        self.config_edit = None;
+        cx.notify();
+    }
+
+    fn save_config_edit(&mut self, cx: &mut Context<Self>) {
+        let Some(edit) = self.config_edit.take() else {
+            return;
+        };
+        let value = edit.draft.read(cx).value().to_string();
+        // 编辑期间若切了播放器或文件，绝不能把这份草稿写进别的文件。
+        if edit.player_idx != self.config_player || edit.file_idx != self.config_file {
+            self.status = Some(StatusMessage::warning("编辑期间切换了文件，已取消保存"));
+            cx.notify();
+            return;
+        }
+        let target: Option<(PathBuf, ConfigFileFormat)> = self
+            .current_config_file()
+            .map(|(_, file)| (file.path.clone(), file.format));
+        let Some((path, format)) = target else {
+            self.status = Some(StatusMessage::error("配置文件已不存在，编辑已取消"));
+            cx.notify();
+            return;
+        };
+        let backups = BackupManager::with_default_root();
+        let result = document::set_option_value(&path, format, &edit.key, &value, &backups);
+        match result {
+            Ok(outcome) => {
+                let before = outcome.previous.unwrap_or_else(|| "新增".to_string());
+                self.status = Some(StatusMessage::success(format!(
+                    "{}：{} = {} → {}（已备份 {}）",
+                    path.display(),
+                    outcome.key,
+                    before,
+                    outcome.value,
+                    outcome.backup_stamp
+                )));
+                self.refresh();
+            }
+            Err(error) => self.status = Some(StatusMessage::error(error)),
+        }
+        cx.notify();
+    }
+
+    fn undo_config_edit(&mut self, cx: &mut Context<Self>) {
+        let target = self
+            .current_config_file()
+            .map(|(_, file)| file.path.clone());
+        let Some(path) = target else {
+            self.status = Some(StatusMessage::warning("当前没有选中的配置文件"));
+            cx.notify();
+            return;
+        };
+        let backups = BackupManager::with_default_root();
+        self.status = Some(match document::undo_edit_for(&path, &backups) {
+            Ok(_) => StatusMessage::success(format!("已撤回 {} 的最近一次编辑", path.display())),
+            Err(error) => StatusMessage::error(error),
+        });
+        self.config_edit = None;
+        self.refresh();
+        cx.notify();
+    }
+
+    /// 配置页的行过滤：只看配置项时隐藏注释与空行；关掉注释时连注释归属一起隐藏。
+    fn config_line_visible(&self, line: &ConfigLineView) -> bool {
+        let is_entry = matches!(line.kind, ConfigLineKind::Entry | ConfigLineKind::Binding);
+        if self.config_entries_only {
+            return is_entry;
+        }
+        if !self.config_show_comments && line.kind == ConfigLineKind::Comment {
+            return false;
+        }
+        true
     }
 
     // -----------------------------------------------------------------------
@@ -1300,15 +1534,18 @@ impl AppShell {
         );
         head = head.child(title_row);
 
-        // 工具行：仅在播放器相关页面出现，避免无关页面堆叠控件。
-        if matches!(self.page, Page::Overview | Page::Players) {
+        // 工具行：只在有写入动作的页面出现；冲突策略与同步绑定，配置页不需要它，
+        // 但编辑/撤回的结果提示必须能看到。
+        if matches!(self.page, Page::Overview | Page::Players | Page::Configs) {
             let mut tools = h_flex().items_center().gap_2().pt_2();
-            tools = tools.child(
-                Button::new("policy")
-                    .label(self.policy_label())
-                    .with_size(Size::Small)
-                    .on_click(cx.listener(|this, _, _, cx| this.cycle_policy(cx))),
-            );
+            if matches!(self.page, Page::Overview | Page::Players) {
+                tools = tools.child(
+                    Button::new("policy")
+                        .label(self.policy_label())
+                        .with_size(Size::Small)
+                        .on_click(cx.listener(|this, _, _, cx| this.cycle_policy(cx))),
+                );
+            }
             if let Some(status) = &self.status {
                 let color = status.kind.color(cx);
                 tools = tools.child(
@@ -1633,6 +1870,38 @@ impl AppShell {
         }
         body = body.child(summary);
 
+        // --- 管理动作：配置查看、目录、启动、惰性版本探测 ---
+        let mut manage = h_flex().flex_wrap().items_center().gap_2();
+        manage = manage.child(
+            Button::new(SharedString::from(format!("open-configs-{idx}")))
+                .label("查看配置")
+                .with_size(Size::XSmall)
+                .on_click(cx.listener(move |this, _, _, cx| this.open_configs(idx, cx))),
+        );
+        if panel.config_dir.is_some() {
+            manage = manage.child(
+                Button::new(SharedString::from(format!("open-dir-{idx}")))
+                    .label("打开配置目录")
+                    .with_size(Size::XSmall)
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.open_player_config_dir(idx, cx)),
+                    ),
+            );
+        }
+        manage = manage.child(
+            Button::new(SharedString::from(format!("launch-{idx}")))
+                .label("启动播放器")
+                .with_size(Size::XSmall)
+                .on_click(cx.listener(move |this, _, _, cx| this.launch_selected_player(idx, cx))),
+        );
+        manage = manage.child(
+            Button::new(SharedString::from(format!("version-{idx}")))
+                .label("探测版本")
+                .with_size(Size::XSmall)
+                .on_click(cx.listener(move |this, _, _, cx| this.probe_version_of(idx, cx))),
+        );
+        body = body.child(manage);
+
         // --- uosc.conf 取值：按分类分组，chip 流呈现 ---
         if let Some(options) = &panel.options {
             let mut groups: Vec<(&'static str, Vec<&UoscOptionValue>)> = Vec::new();
@@ -1911,6 +2180,578 @@ impl AppShell {
         }
 
         body.into_any_element()
+    }
+
+    // -----------------------------------------------------------------------
+    // 配置页：原文逐行 + 注释 + 生效关系 + 冲突 + 值级编辑
+    // -----------------------------------------------------------------------
+
+    /// 配置页。数据全部来自 `core::config::document` 的逐行视图，
+    /// 这里不读文件字节，也不自己拼 conf 文本。
+    fn render_configs(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        self.clamp_config_selection();
+        let t = cx.theme();
+        let fg = t.colors.foreground;
+        let muted = t.colors.muted_foreground;
+        let primary = t.colors.primary;
+        let primary_fg = t.colors.primary_foreground;
+        let secondary = t.colors.secondary;
+        let success = t.colors.success;
+        let warning = t.colors.warning;
+
+        if self.config_workspaces.is_empty() {
+            let action = Button::new("configs-rescan-empty")
+                .label("重新扫描")
+                .primary()
+                .with_size(Size::Small)
+                .on_click(cx.listener(|this, _, _, cx| this.rescan(cx)))
+                .into_any_element();
+            return empty_state(
+                "未检测到 MPV 内核播放器",
+                "配置页按播放器分组展示 mpv.conf、input.conf 与脚本选项。安装播放器后重新扫描。",
+                Some(action),
+                cx,
+            )
+            .into_any_element();
+        }
+
+        let mut body = v_flex().gap_4();
+
+        // --- 播放器选择 ---
+        let mut player_row = h_flex().flex_wrap().items_center().gap_2();
+        for (idx, workspace) in self.config_workspaces.iter().enumerate() {
+            let selected = idx == self.config_player;
+            let mut button = Button::new(SharedString::from(format!("cfg-player-{idx}")))
+                .label(format!(
+                    "{}（{} 文件）",
+                    workspace.player_name,
+                    workspace.files.len()
+                ))
+                .with_size(Size::XSmall);
+            if selected {
+                button = button.primary();
+            }
+            player_row = player_row.child(button.on_click(cx.listener(move |this, _, _, cx| {
+                this.config_player = idx;
+                this.config_file = 0;
+                this.config_all_files = false;
+                this.config_all_lines = false;
+                this.config_edit = None;
+                cx.notify();
+            })));
+        }
+        body = body.child(
+            card(cx)
+                .gap_2()
+                .child(section_title("选择播放器", cx))
+                .child(player_row),
+        );
+
+        // --- 文件选择 ---
+        let workspace = &self.config_workspaces[self.config_player];
+        let file_count = workspace.files.len();
+        let shown_files = if self.config_all_files {
+            file_count
+        } else {
+            file_count.min(12)
+        };
+        let mut file_row = h_flex().flex_wrap().gap_2();
+        for (idx, file) in workspace.files.iter().take(shown_files).enumerate() {
+            let selected = idx == self.config_file;
+            file_row = file_row.child(
+                h_flex()
+                    .id(ElementId::Name(SharedString::from(format!(
+                        "cfg-file-{idx}"
+                    ))))
+                    .h(px(24.))
+                    .px_2()
+                    .items_center()
+                    .rounded(px(6.))
+                    .text_xs()
+                    .bg(if selected { primary } else { secondary })
+                    .text_color(if selected { primary_fg } else { fg })
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.config_file = idx;
+                        this.config_all_lines = false;
+                        this.config_edit = None;
+                        cx.notify();
+                    }))
+                    .child(file.name.clone()),
+            );
+        }
+        if file_count > shown_files {
+            file_row = file_row.child(
+                Button::new("cfg-more-files")
+                    .label(format!("展开全部 {file_count}"))
+                    .with_size(Size::XSmall)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.config_all_files = !this.config_all_files;
+                        cx.notify();
+                    })),
+            );
+        }
+        if file_count == 0 {
+            file_row = file_row.child(
+                div()
+                    .text_xs()
+                    .text_color(muted)
+                    .child("该配置目录里还没有 .conf 文件"),
+            );
+        }
+        let mut file_card = card(cx)
+            .gap_2()
+            .child(section_title("配置文件", cx))
+            .child(file_row);
+        let mut location = format!(
+            "配置目录 {}",
+            workspace
+                .config_dir
+                .as_ref()
+                .map(|dir| dir.display().to_string())
+                .unwrap_or_else(|| "未找到".to_string())
+        );
+        if let Some(file) = workspace.files.get(self.config_file) {
+            location.push_str(&format!(" · 当前格式 {}", file.format.label()));
+        }
+        file_card = file_card.child(div().text_xs().text_color(muted).child(location));
+        body = body.child(file_card);
+
+        // 当前文件从工作区里克隆一份：后面要同时读 self 的状态与 cx 的监听器，
+        // 持有跨调用的引用会把借用缠在一起；单个文件的克隆开销可以忽略。
+        let current = self
+            .current_config_file()
+            .map(|(workspace, file)| (workspace.config_dir.clone(), file.clone()));
+        let Some((config_dir, file)) = current else {
+            return body
+                .child(
+                    card(cx).child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child("先创建 mpv.conf 或 input.conf，再回来查看；也可以点「打开配置目录」在外部编辑器里新建。"),
+                    ),
+                )
+                .into_any_element();
+        };
+
+        // --- 统计 + 过滤 + 动作 ---
+        let backups = BackupManager::with_default_root();
+        let undo_count = document::available_undo(&file.path, &backups);
+        let mut stats = h_flex()
+            .flex_wrap()
+            .items_center()
+            .gap_2()
+            .child(badge(format!("{} 行", file.lines.len()), fg, secondary))
+            .child(badge(format!("{} 配置项", file.entry_count), fg, secondary))
+            .child(badge(
+                format!("{} 注释", file.comment_count + file.inline_comment_count),
+                primary,
+                secondary,
+            ))
+            .child(badge(
+                format!("{} 生效", file.effective_count),
+                success,
+                secondary,
+            ));
+        if file.superseded_count > 0 {
+            stats = stats.child(badge(
+                format!("{} 被覆盖", file.superseded_count),
+                warning,
+                secondary,
+            ));
+        }
+        stats = stats
+            .child(badge(file.line_ending.label(), muted, secondary))
+            .child(badge(
+                if file.round_trip {
+                    "往返 ✓"
+                } else {
+                    "往返 ✗"
+                },
+                if file.round_trip { success } else { warning },
+                secondary,
+            ));
+
+        let show_comments = self.config_show_comments;
+        let entries_only = self.config_entries_only;
+        let mut tools = h_flex().flex_wrap().items_center().gap_2();
+        tools = tools
+            .child(
+                h_flex()
+                    .id(ElementId::Name(SharedString::from("cfg-toggle-comments")))
+                    .h(px(24.))
+                    .px_2()
+                    .items_center()
+                    .rounded(px(6.))
+                    .text_xs()
+                    .bg(if show_comments { primary } else { secondary })
+                    .text_color(if show_comments { primary_fg } else { fg })
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.config_show_comments = !this.config_show_comments;
+                        cx.notify();
+                    }))
+                    .child(if show_comments {
+                        "✓ 显示注释"
+                    } else {
+                        "隐藏注释"
+                    }),
+            )
+            .child(
+                h_flex()
+                    .id(ElementId::Name(SharedString::from("cfg-toggle-entries")))
+                    .h(px(24.))
+                    .px_2()
+                    .items_center()
+                    .rounded(px(6.))
+                    .text_xs()
+                    .bg(if entries_only { primary } else { secondary })
+                    .text_color(if entries_only { primary_fg } else { fg })
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.config_entries_only = !this.config_entries_only;
+                        cx.notify();
+                    }))
+                    .child(if entries_only {
+                        "✓ 只看配置项"
+                    } else {
+                        "显示全文"
+                    }),
+            )
+            .child(
+                Button::new("cfg-rescan")
+                    .label("重新扫描")
+                    .with_size(Size::XSmall)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.refresh();
+                        this.status = Some(StatusMessage::info("配置已重新读取"));
+                        cx.notify();
+                    })),
+            );
+        if let Some(dir) = &config_dir {
+            let path = dir.clone();
+            tools = tools.child(
+                Button::new("cfg-open-dir")
+                    .label("打开配置目录")
+                    .with_size(Size::XSmall)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.status = Some(match open_directory(&path) {
+                            Ok(()) => StatusMessage::success(format!("已打开 {}", path.display())),
+                            Err(error) => StatusMessage::error(error),
+                        });
+                        cx.notify();
+                    })),
+            );
+        }
+        if undo_count > 0 {
+            tools = tools.child(
+                Button::new("cfg-undo")
+                    .label(format!("撤回编辑（{undo_count}）"))
+                    .with_size(Size::XSmall)
+                    .on_click(cx.listener(|this, _, _, cx| this.undo_config_edit(cx))),
+            );
+        }
+        body = body.child(
+            card(cx)
+                .gap_2()
+                .child(section_title(
+                    format!("{} · {}", file.name, file.summary()),
+                    cx,
+                ))
+                .child(stats)
+                .child(tools),
+        );
+
+        // --- 编辑条 ---
+        if let Some(edit) = self.config_edit.clone() {
+            let draft = edit.draft.clone();
+            let edit_row = h_flex()
+                .flex_wrap()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(fg)
+                        .child(format!("编辑 {} =", edit.key)),
+                )
+                .child(div().w(px(220.)).child(Input::new(&draft).small()))
+                .child(
+                    Button::new("cfg-save")
+                        .label("保存")
+                        .with_size(Size::XSmall)
+                        .on_click(cx.listener(|this, _, _, cx| this.save_config_edit(cx))),
+                )
+                .child(
+                    Button::new("cfg-cancel")
+                        .label("取消")
+                        .with_size(Size::XSmall)
+                        .on_click(cx.listener(|this, _, _, cx| this.cancel_config_edit(cx))),
+                );
+            body = body.child(
+                card(cx).gap_2().child(edit_row).child(
+                    div()
+                        .text_xs()
+                        .text_color(muted)
+                        .child("只改生效行；注释、缩进与行尾说明原样保留，写前自动备份。"),
+                ),
+            );
+        }
+
+        // --- 原文逐行 ---
+        let mut line_list = v_flex().gap_0();
+        let mut shown_lines = 0_usize;
+        let mut hidden_lines = 0_usize;
+        const LINE_LIMIT: usize = 240;
+        for line in &file.lines {
+            if !self.config_line_visible(line) {
+                continue;
+            }
+            if !self.config_all_lines && shown_lines >= LINE_LIMIT {
+                hidden_lines += 1;
+                continue;
+            }
+            shown_lines += 1;
+            line_list = line_list.child(self.render_config_line(
+                line,
+                &file,
+                self.config_player,
+                self.config_file,
+                cx,
+            ));
+        }
+        if shown_lines == 0 {
+            line_list = line_list.child(
+                div()
+                    .text_xs()
+                    .text_color(muted)
+                    .child("当前过滤条件下没有可显示的行。"),
+            );
+        }
+        let mut line_card = card(cx).gap_1().child(line_list);
+        if let Some(error) = &file.error {
+            line_card = line_card.child(
+                div()
+                    .text_xs()
+                    .text_color(warning)
+                    .child(format!("! {error}")),
+            );
+        } else if !file.round_trip {
+            line_card = line_card.child(
+                div()
+                    .text_xs()
+                    .text_color(warning)
+                    .child("! 往返自检未通过（可能是混合行尾），为避免破坏原文已禁用编辑。"),
+            );
+        }
+        if hidden_lines > 0 || self.config_all_lines && file.lines.len() > LINE_LIMIT {
+            line_card = line_card.child(
+                Button::new("cfg-more-lines")
+                    .label(if self.config_all_lines {
+                        "收起长文件".to_string()
+                    } else {
+                        format!("继续显示剩余 {hidden_lines} 行")
+                    })
+                    .with_size(Size::XSmall)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.config_all_lines = !this.config_all_lines;
+                        cx.notify();
+                    })),
+            );
+        }
+        body = body.child(line_card);
+
+        // --- 冲突与警告：生效值 + 来源文件 + 行号 ---
+        let report = self
+            .panels
+            .get(self.config_player)
+            .map(|panel| panel.report.clone())
+            .unwrap_or_default();
+        if report.has_findings() {
+            let mut rows = v_flex().gap_1();
+            for conflict in &report.value_conflicts {
+                if let Some(last) = conflict.values.last() {
+                    rows = rows.child(div().text_xs().text_color(warning).child(format!(
+                        "{}：生效「{}」· {} 第 {} 行 · 共 {} 处定义",
+                        conflict.key,
+                        conflict.effective,
+                        last.source,
+                        last.line_no + 1,
+                        conflict.values.len()
+                    )));
+                }
+            }
+            for conflict in &report.input_conflicts {
+                if let Some(effective) = conflict.bindings.get(conflict.effective_index) {
+                    rows = rows.child(div().text_xs().text_color(warning).child(format!(
+                        "按键 {}：生效「{}」· {} 第 {} 行 · 共 {} 处绑定",
+                        conflict.key,
+                        effective.command,
+                        effective.source,
+                        effective.line_no + 1,
+                        conflict.bindings.len()
+                    )));
+                }
+            }
+            for text in &report.warnings {
+                rows = rows.child(
+                    div()
+                        .text_xs()
+                        .text_color(warning)
+                        .child(format!("! {text}")),
+                );
+            }
+            body = body.child(
+                card(cx)
+                    .gap_2()
+                    .child(section_title("冲突与警告（生效值 + 来源 + 行号）", cx))
+                    .child(rows),
+            );
+        }
+
+        body.child(
+            card(cx).child(
+                div()
+                    .text_xs()
+                    .text_color(fg)
+                    .child("注释分两类：整行 # 说明与行尾 # 说明。mpv 官方语法不识别行尾注释（会把它算进取值），这里只在展示层拆开标注；编辑时整行原文写回，不改变语义。"),
+            ),
+        )
+        .into_any_element()
+    }
+
+    /// 一行原文：行号 + 类型 + 主文本/行尾注释 + 生效状态 + 编辑入口 + 注释归属。
+    fn render_config_line(
+        &self,
+        line: &ConfigLineView,
+        file: &ConfigFileView,
+        player_idx: usize,
+        file_idx: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = cx.theme();
+        let fg = t.colors.foreground;
+        let muted = t.colors.muted_foreground;
+        let primary = t.colors.primary;
+        let secondary = t.colors.secondary;
+        let success = t.colors.success;
+        let warning = t.colors.warning;
+
+        let is_comment = line.kind == ConfigLineKind::Comment;
+        let is_content = matches!(line.kind, ConfigLineKind::Entry | ConfigLineKind::Binding);
+        let kind_color = if is_comment {
+            primary
+        } else if is_content {
+            fg
+        } else {
+            muted
+        };
+        let text_color = if is_content
+            || matches!(
+                line.kind,
+                ConfigLineKind::Verbatim | ConfigLineKind::Section
+            ) {
+            fg
+        } else {
+            muted
+        };
+
+        let mut text_row = h_flex().flex_1().min_w_0().items_center();
+        if is_comment {
+            text_row = text_row
+                .pl(px((line.indent as f32).min(16.)))
+                .child(div().text_xs().text_color(primary).child("│ "));
+        }
+        text_row = text_row.child(
+            div()
+                .text_xs()
+                .truncate()
+                .text_color(text_color)
+                .child(line.text.clone()),
+        );
+        if self.config_show_comments
+            && let Some(note) = &line.inline_comment
+        {
+            text_row = text_row.child(
+                div()
+                    .text_xs()
+                    .flex_none()
+                    .text_color(muted)
+                    .child(format!("  {note}")),
+            );
+        }
+
+        let mut row = h_flex()
+            .items_center()
+            .gap_2()
+            .py_1()
+            .child(
+                div()
+                    .w(px(34.))
+                    .flex_none()
+                    .text_xs()
+                    .text_color(muted)
+                    .child(line.display_line_no().to_string()),
+            )
+            .child(
+                div()
+                    .w(px(48.))
+                    .flex_none()
+                    .text_xs()
+                    .text_color(kind_color)
+                    .child(line.kind.label()),
+            )
+            .child(text_row);
+
+        row = match line.effective {
+            EffectiveState::Active => row.child(badge("生效", success, secondary)),
+            EffectiveState::Superseded(by) => {
+                row.child(badge(format!("被第 {} 行覆盖", by + 1), warning, secondary))
+            }
+            EffectiveState::NotApplicable => row,
+        };
+
+        if file.editable()
+            && line.effective == EffectiveState::Active
+            && is_content
+            && let Some(key) = line.key.clone()
+        {
+            let initial = line.value.clone().unwrap_or_default();
+            row = row.child(
+                Button::new(SharedString::from(format!(
+                    "cfg-edit-{file_idx}-{}",
+                    line.line_no
+                )))
+                .label("编辑")
+                .with_size(Size::XSmall)
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.begin_config_edit(
+                        player_idx,
+                        file_idx,
+                        key.clone(),
+                        initial.clone(),
+                        window,
+                        cx,
+                    );
+                })),
+            );
+        }
+
+        let mut cell = v_flex().gap_0().child(row);
+        if self.config_show_comments
+            && let Some(note) = &line.doc_comment
+        {
+            cell = cell.child(
+                div()
+                    .pl(px(90.))
+                    .text_xs()
+                    .truncate()
+                    .text_color(muted)
+                    .child(format!("说明：{note}")),
+            );
+        }
+        cell.into_any_element()
     }
 
     // -----------------------------------------------------------------------
@@ -2579,6 +3420,7 @@ impl Render for AppShell {
         let content = match self.page {
             Page::Overview => self.render_overview(cx),
             Page::Players => self.render_players(cx),
+            Page::Configs => self.render_configs(cx),
             Page::Settings => self.render_settings(cx),
             Page::GlassLab => self.render_glass_lab(cx),
             _ => self.render_pending(cx),

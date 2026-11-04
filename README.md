@@ -123,6 +123,21 @@
   </tr>
 </table>
 
+配置管理页按**原文逐行**展示 `mpv.conf` / `input.conf` / `script-opts/*.conf`：整行注释、` #` 起的行尾说明、紧邻注释块的归属说明、生效与「被第 N 行覆盖」都保留在视图里；只有生效的配置项可编辑，写前自动备份、可撤回（设计见[架构文档](docs/架构文档.md) §5.11）：
+
+<table align="center">
+  <tr>
+    <td align="center" width="50%">
+      <img src="docs/screenshots/configs-glass.png" alt="配置页" width="100%">
+      <br><sub><b>配置页 · 播放器 / 文件切换与逐行注释</b></sub>
+    </td>
+    <td align="center" width="50%">
+      <img src="docs/screenshots/configs-entries.png" alt="配置页逐行视图" width="100%">
+      <br><sub><b>逐行原文 · 注释 / 行尾说明 / 生效状态 / 编辑</b></sub>
+    </td>
+  </tr>
+</table>
+
 > 截图为当前开发版本实拍，随界面迭代可能变化。
 
 ## 📦 快速开始

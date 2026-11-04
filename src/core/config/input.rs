@@ -27,7 +27,11 @@ enum InputLine {
 /// input.conf 文档
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InputDoc {
+    /// 结构化判定（语义层）
     lines: Vec<InputLine>,
+    /// 每行原文（去掉行尾 `\r`），渲染以它为准，保留缩进、对齐与行尾空格。
+    /// 与 `conf::ConfDoc` 同一套无损策略；`set_binding` 会同步更新被改的行。
+    raw_lines: Vec<String>,
     crlf: bool,
     trailing_newline: bool,
 }
@@ -43,10 +47,13 @@ impl InputDoc {
     pub fn parse(text: &str) -> Self {
         let crlf = text.contains("\r\n");
         let trailing_newline = text.ends_with('\n');
-        let lines = text
+        let raw_lines: Vec<String> = text
             .lines()
-            .map(|raw| {
-                let line = raw.trim_end_matches('\r');
+            .map(|raw| raw.trim_end_matches('\r').to_string())
+            .collect();
+        let lines = raw_lines
+            .iter()
+            .map(|line| {
                 let trimmed = line.trim();
                 if trimmed.is_empty() {
                     InputLine::Blank
@@ -86,6 +93,7 @@ impl InputDoc {
         // 回填真实行号
         let mut doc = Self {
             lines,
+            raw_lines,
             crlf,
             trailing_newline,
         };
@@ -108,42 +116,45 @@ impl InputDoc {
             .collect()
     }
 
-    /// 修改绑定：更新该键最后一次出现位置的命令，不存在则追加
-    #[allow(dead_code)] // TODO(M2-UI): 按键编辑器 UI 接入后移除此属性
+    /// 修改绑定：更新该键最后一次出现位置的命令，不存在则追加。
+    ///
+    /// 只重写被改那一行的原文；行尾注释按原样保留，其余行一字不动。
+    /// 配置页的写入走 `document::set_option_value` 的精确行替换（还会保留值后的
+    /// 对齐空格），这里保留为解析器的对称 API，由单测覆盖。
+    #[allow(dead_code)]
     pub fn set_binding(&mut self, key: &str, command: &str) -> bool {
-        for line in self.lines.iter_mut().rev() {
+        for (idx, line) in self.lines.iter_mut().enumerate().rev() {
             if let InputLine::Binding(binding) = line
                 && normalize_key(&binding.key) == normalize_key(key)
             {
+                let raw = match &binding.comment {
+                    Some(comment) => {
+                        format!("{} {command} # {comment}", binding.key)
+                    }
+                    None => format!("{} {command}", binding.key),
+                };
                 binding.command = command.to_string();
+                if let Some(target) = self.raw_lines.get_mut(idx) {
+                    *target = raw;
+                }
                 return true;
             }
         }
+        let raw = format!("{key} {command}");
         self.lines.push(InputLine::Binding(InputBinding {
             key: key.to_string(),
             command: command.to_string(),
             line_no: self.lines.len(),
             comment: None,
         }));
+        self.raw_lines.push(raw);
         false
     }
 
     /// 渲染回文本（与源文本逐字节一致，除非行尾风格被统一）
     pub fn render(&self) -> String {
         let sep = if self.crlf { "\r\n" } else { "\n" };
-        let mut out = self
-            .lines
-            .iter()
-            .map(|line| match line {
-                InputLine::Binding(binding) => match &binding.comment {
-                    Some(comment) => format!("{} {} # {}", binding.key, binding.command, comment),
-                    None => format!("{} {}", binding.key, binding.command),
-                },
-                InputLine::Comment(text) | InputLine::Verbatim(text) => text.clone(),
-                InputLine::Blank => String::new(),
-            })
-            .collect::<Vec<_>>()
-            .join(sep);
+        let mut out = self.raw_lines.join(sep);
         if self.trailing_newline {
             out.push_str(sep);
         }
@@ -195,5 +206,35 @@ mod tests {
         assert!(!doc.set_binding("F12", "script-message hi")); // 新键走追加
         let last = doc.bindings().pop();
         assert_eq!(last.map(|b| b.key), Some("F12".to_string()));
+    }
+
+    /// 真实整合包 input.conf 的常见形态：缩进、制表符对齐、行尾空格与行尾注释。
+    const MESSY: &str = concat!(
+        "  # 缩进注释  \n",
+        "\n",
+        "Ctrl+c   ignore   # 示例说明\n",
+        "\tq\tquit\t\n",
+        "[section]\n",
+    );
+
+    #[test]
+    fn render_round_trip_messy_lf() {
+        assert_eq!(InputDoc::parse(MESSY).render(), MESSY);
+    }
+
+    #[test]
+    fn render_round_trip_messy_crlf() {
+        let crlf = MESSY.replace('\n', "\r\n");
+        assert_eq!(InputDoc::parse(&crlf).render(), crlf);
+    }
+
+    #[test]
+    fn set_binding_keeps_trailing_comment_and_other_lines() {
+        let mut doc = InputDoc::parse(MESSY);
+        assert!(doc.set_binding("Ctrl+c", "quit"));
+        assert_eq!(
+            doc.render(),
+            MESSY.replace("Ctrl+c   ignore   # 示例说明", "Ctrl+c quit # 示例说明")
+        );
     }
 }

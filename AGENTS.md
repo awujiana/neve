@@ -18,12 +18,13 @@
 | `src/main.rs` | 入口：检测播放器 → 构建视图模型 → 初始化组件库 → 投影设计令牌 → 开窗 | ✅ |
 | `src/core/` | 纯逻辑层，不依赖 GPUI，可单测 | ✅ |
 | `src/core/players.rs` | 三路播放器检测（常见路径 / 注册表 / PATH） | ✅ |
-| `src/core/config/` | 无损 conf 解析、input 绑定、冲突检测、扫描报告 | ✅ |
+| `src/core/config/` | 无损 conf 解析（语义层 + 原文层双表示）、input 绑定、冲突检测、扫描报告、配置工作区逐行视图 | ✅ |
+| `src/core/config/document.rs` | 配置目录扫描、逐行视图（注释 / 行尾说明 / 注释归属 / 生效关系）、值级编辑与撤回；`ui` 配置页的唯一数据源 | ✅ |
 | `src/core/scripts/` | 脚本枚举、启停、依赖扫描；`uosc.rs` 为 uosc 专项 | ✅ |
 | `src/core/sync.rs` | 跨包同步的计划与执行（FR-03） | ✅ |
 | `src/core/backup.rs` | 写前备份与撤回，**所有写操作的必经之路** | ✅ |
 | `src/core/store.rs` | 数据目录定位（便携版优先） | ✅ |
-| `src/ui/mod.rs` | 页面骨架、侧栏、概览页、播放器页与交互动作 | ✅ |
+| `src/ui/mod.rs` | 页面骨架、侧栏、概览页 / 播放器页 / 配置页 / 玻璃实验室与交互动作 | ✅ |
 | `src/ui/theme.rs` | 设计令牌 → `ThemeColor` 语义槽位的投影 | ✅ |
 | `src/ui/glass/` | 液态玻璃组件库：参数(`spec`) / 解析(`resolve`) / 组件(`surface`) 三层 | ✅ |
 | `docs/` | 设计文档、架构文档、UI 规范、质量门禁、`screenshots/` | ✅ |
@@ -38,6 +39,9 @@
 2. **项目核心不变量**：
    - **写前必备份**：任何对播放器目录或注册表的写入，必须先经 `BackupManager::backup_file`，再由 `restore_latest` 提供撤回入口。绕过 `core::backup` 的写操作一律视为缺陷。
    - **无损配置解析**：`core::config::conf` 必须保留行序、注释、空行与 CRLF，`render()` 必须能字节级往返。禁止用「读成 HashMap 再写回」的实现替换它。
+   - **双表示无损渲染**：`ConfDoc` / `InputDoc` 同时保存语义层 `lines`（供 `entries()` / `get()` / 冲突检测）与原文层 `raw_lines`；`render()` 直接 `raw_lines.join(sep)`。从结构化字段重新拼行必然丢掉真实整合包里的缩进注释、对齐空格、行尾空格与行尾说明；`set_key` / `set_binding` 必须同步更新被改行的原文。
+   - **配置 UI 只消费逐行视图**：`ui` 不读配置字节，一律经 `core::config::document` 的 `PlayerConfigWorkspace` / `ConfigFileView` / `ConfigLineView`。整行注释、行尾说明、注释归属、生效 / 被覆盖状态都在视图里算好，页面不自己解析 conf。
+   - **行尾注释只是展示层**：mpv.conf 官方语法不支持行内注释，`key=value # 说明` 里的 `# 说明` 实际会进入 value。`split_inline_comment()` 只用于显示，写入仍以原文行回写，不能改变 mpv 看到的语义；注释掉的行（`#gpu-api=…`）只展示、不给「编辑」入口。
    - **last-wins 语义**：mpv 的 `mpv.conf` / `input.conf` 同名键以最后一次出现为准。冲突检测必须给出「生效值 + 来源文件 + 行号」，不能只报「有重复」。
    - **语义色优先**：界面颜色一律取 `cx.theme().colors.*`，禁止在页面里硬编码 `rgb(0x…)`。令牌由 `src/ui/theme.rs` 投影，昼夜主题与对比度依赖这一层。
    - **布局不变量**：根容器必须有 `size_full()` + `bg(background)` + `text_color(foreground)`；内容区滚动容器必须有 `flex_1()` + `min_h_0()` + `overflow_y_scrollbar()`。缺任一项会重现「白底浅色字 / 无法滚动」的历史问题。
@@ -49,6 +53,8 @@
    - `src/core/` 内禁止 `use gpui_kit::*`，core 层必须可脱离 GUI 单测。
    - **界面风格是液态玻璃，不许改成扁平 / 不透明**。卡片一律用 `ui::card()`（内部走 `ui::glass::card`）或 `ui::theme::glass(cx)` 取材质，禁止在页面里直接写 `rgb()` / 不透明背景色，也不要再手拼 `BoxShadow` 玻璃层——参数与分层统一由 `src/ui/glass/` 负责。
    - **组件库的参数层不含颜色**：`GlassSpec` / `GlassPreset` 只有数值，颜色一律在 `resolve.rs` 从 `theme::Glass` 令牌派生。给参数层加颜色常量会绕过语义色投影，也会破坏半透背景链（实色一铺，窗口层亚克力就看不见了）。新增玻璃能力先读 `docs/液态玻璃组件库.md` §3 的 GPUI 能力边界。
+   - **配置编辑必须值级替换 + 写前备份**：`document::set_option_value()` 只替换生效行的 value 片段，保留缩进、等号后对齐、值后 padding 与行尾说明；写前经 `BackupManager::backup_file`，写后用解析器做 `render()` 往返与结构化自检。非 UTF-8、混合行尾或往返自检失败的文件标记 `error`，一律禁止编辑与保存。
+   - **组件库输入框也要自己的 bounds**：配置编辑框必须挂在 `Entity<InputState>` 上（与 `SliderState` 同理），自绘 `Div` 处理不了光标、选中与键盘事件。编辑期间切换播放器 / 文件要取消保存，避免把值写到别的文件。
    - **玻璃必须真的透**：改任何背景相关代码都要沿「背景链」逐层确认没有实色铺底——组件库 `Root` 会用 `theme.tokens.background` 给**整窗**刷一层底色，只要它是实色，窗口层的亚克力就完全看不见，界面会退化成一块黑板。清掉它的办法是在 `ui::theme::set_appearance` 里把 `colors.background` 设为全透明，窗口底色改由我们自己的根容器画带 alpha 的渐变。验证方式见 `scripts/probe_transparency.py`。
    - **次级文字不能压太暗**：玻璃底下会透出任意颜色的桌面，中性灰（`text_secondary`）压到 `#8a8a92` 一档时，落在高饱和背景上就读不出来了。
    - **不要给背景加装饰光斑**。曾经用 `ui::glow()`（64 层同心圆叠径向衰减）在右上/左下放两处柔光，实测在半透底上会显出圆形轮廓，已整体移除；背景只保留一层斜向渐变。GPUI 也没有径向渐变与大半径模糊（`blur_radius` 几百像素会因采样精度不足出现多边形棱边），别再尝试这条路。
@@ -78,8 +84,9 @@
   ```
 
 - **改界面**：`cargo run` 实际启动，分别截图深色与浅色两套，确认：根容器有底色、内容区可滚动、控件尺寸正常、文本对比度 ≥ 4.5:1。截图存到 `docs/screenshots/`。
-- **改 `core/config`**：必须补往返渲染测试（LF 与 CRLF 各一），确认注释与行序未被破坏。
-- **改写操作**：确认走 `BackupManager`，并补一条「写入 → 撤回 → 内容还原」的测试。
+- **改 `core/config`**：必须补往返渲染测试（LF 与 CRLF 各一），确认注释、缩进、对齐空格与行序未被破坏；改逐行视图还要确认行尾说明与生效 / 被覆盖标记仍在。
+- **改写操作**：确认走 `BackupManager`，并补一条「写入 → 撤回 → 内容还原」的测试，配置编辑还要断言注释与行尾说明没被改掉。
+- **改配置页**：`cargo run` 实测，确认注释可见、行尾说明拆分、生效 / 被覆盖徽标、编辑条与撤回入口；截图存 `docs/screenshots/`。
 - **改徽章**：只改 `scripts/badges.config.json`，跑 `python scripts/update_badges.py`，再跑 `--check`。
 - **改文档**：正文与代码不一致时以代码为准，并同步 `CHANGELOG.md`。
 - **提交**：`git status` 确认不含 `target/`、临时文件与本地绝对路径截图。
