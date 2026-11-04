@@ -13,16 +13,20 @@ use std::sync::Arc;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::scroll::ScrollableElement as _;
+use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{
-    ActiveTheme as _, InteractiveElementExt as _, Sizable as _, Size, h_flex, v_flex,
-};
+use gpui_kit::component::{ActiveTheme as _, Sizable as _, Size, h_flex, v_flex};
 use gpui_kit::{
-    AnyElement, App, BoxShadow, Context, Div, ElementId, FontWeight, Hsla, ImageSource,
-    IntoElement, MouseButton, ObjectFit, ParentElement as _, PathPromptOptions, Render, Resource,
-    SharedString, Styled as _, Window, WindowBackgroundAppearance, div, img, linear_color_stop,
-    linear_gradient, point, prelude::*, px,
+    AnyElement, App, BoxShadow, Context, Div, ElementId, Entity, FontWeight, Hsla, ImageSource,
+    IntoElement, ObjectFit, ParentElement as _, PathPromptOptions, Render, Resource, SharedString,
+    Styled as _, Window, WindowBackgroundAppearance, WindowControlArea, div, img,
+    linear_color_stop, linear_gradient, point, prelude::*, px,
 };
+// 仅非 Windows 分支需要：那里没有命中测试通道，只能自己接管拖动。
+#[cfg(not(windows))]
+use gpui_kit::MouseButton;
+#[cfg(not(windows))]
+use gpui_kit::component::InteractiveElementExt as _;
 
 use crate::core::backup::BackupManager;
 use crate::core::config::report::PlayerConfigReport;
@@ -317,6 +321,17 @@ fn card(cx: &App) -> Div {
         ])
 }
 
+/// 滑杆值（0..100 的 f32）落到 `u8` 百分比上。
+///
+/// 滑杆步进是 1，理论上是整数；仍夹一次范围，免得浮点尾巴溢出 `u8`。
+fn to_percent(value: f32) -> u8 {
+    if value.is_finite() {
+        value.clamp(0., 100.).round() as u8
+    } else {
+        0
+    }
+}
+
 /// 分区小标题。
 fn section_title(text: impl Into<SharedString>, cx: &App) -> Div {
     div()
@@ -535,6 +550,13 @@ pub struct AppShell {
     expanded_scripts: Vec<usize>,
     /// 标题栏当前展开的菜单项。
     open_menu: Option<TopMenu>,
+    /// 「背景不透明度」滑杆状态。
+    ///
+    /// 组件库的 `Slider` 要拖得动，必须自己记录渲染后的 bounds 才能把鼠标位置换算成值，
+    /// 所以状态由 `Entity<SliderState>` 承载，界面只持有句柄。
+    opacity_slider: Entity<SliderState>,
+    /// 「明暗」滑杆状态。
+    lightness_slider: Entity<SliderState>,
 }
 
 impl AppShell {
@@ -542,7 +564,36 @@ impl AppShell {
         players: Vec<DetectedPlayer>,
         panels: Vec<PlayerPanel>,
         appearance: Appearance,
+        cx: &mut Context<Self>,
     ) -> Self {
+        // 0..100 + step 1 = 1% 精度。SliderState 的默认值恰好如此，但这里显式
+        // 写出来，免得日后组件库改默认值把精度悄悄放大。轨道 180px，
+        // 1% ≈ 1.8px，鼠标可以逐 1% 拖动。
+        let percent_slider = |value: u8| {
+            SliderState::new()
+                .min(0.)
+                .max(100.)
+                .step(1.)
+                .default_value(f32::from(value))
+        };
+        let opacity_slider = cx.new(|_| percent_slider(appearance.background_opacity));
+        let lightness_slider = cx.new(|_| percent_slider(appearance.lightness));
+        // 拖到哪写到哪：Change 只改内存与主题，Release 才落盘——
+        // 一次拖拽会连续发出上百个 Change，每次都写盘会拖垮交互。
+        cx.subscribe(&opacity_slider, |this, _, event, cx| {
+            let value = this.opacity_slider.read(cx).value().end();
+            this.on_slider_change(cx, event, |appearance| {
+                appearance.background_opacity = to_percent(value);
+            });
+        })
+        .detach();
+        cx.subscribe(&lightness_slider, |this, _, event, cx| {
+            let value = this.lightness_slider.read(cx).value().end();
+            this.on_slider_change(cx, event, |appearance| {
+                appearance.lightness = to_percent(value);
+            });
+        })
+        .detach();
         Self {
             players,
             panels,
@@ -552,6 +603,8 @@ impl AppShell {
             appearance,
             expanded_scripts: Vec::new(),
             open_menu: None,
+            opacity_slider,
+            lightness_slider,
         }
     }
 
@@ -625,7 +678,43 @@ impl AppShell {
         if let Err(error) = self.appearance.save() {
             self.status = Some(StatusMessage::warning(format!("外观设置保存失败：{error}")));
         }
+        self.sync_sliders(window, cx);
         cx.notify();
+    }
+
+    /// 滑杆只改内存与主题，不落盘；松手（Release）时才写盘。
+    fn on_slider_change(
+        &mut self,
+        cx: &mut Context<Self>,
+        event: &SliderEvent,
+        change: impl FnOnce(&mut Appearance),
+    ) {
+        change(&mut self.appearance);
+        theme::set_appearance(cx, self.appearance.clone());
+        if matches!(event, SliderEvent::Release(_))
+            && let Err(error) = self.appearance.save()
+        {
+            self.status = Some(StatusMessage::warning(format!("外观设置保存失败：{error}")));
+        }
+        cx.notify();
+    }
+
+    /// 把外观值回写给滑杆，避免两处各说各话（例如配置被手工改过）。
+    ///
+    /// 只在值真的不同时才写：`set_value` 会 notify，无脑写会把自己拖进重绘循环。
+    fn sync_sliders(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let opacity = f32::from(self.appearance.background_opacity);
+        let lightness = f32::from(self.appearance.lightness);
+        self.opacity_slider.update(cx, |slider, cx| {
+            if (slider.value().end() - opacity).abs() > 0.5 {
+                slider.set_value(opacity, window, cx);
+            }
+        });
+        self.lightness_slider.update(cx, |slider, cx| {
+            if (slider.value().end() - lightness).abs() > 0.5 {
+                slider.set_value(lightness, window, cx);
+            }
+        });
     }
 
     fn install(&mut self, idx: usize, cx: &mut Context<Self>) {
@@ -855,8 +944,8 @@ impl AppShell {
             .border_color(g.outline)
             .child(left)
             // 拖动区：图标与菜单之后到右侧控件之前，与真实标题栏行为一致。
-            .child(
-                h_flex()
+            .child({
+                let drag = h_flex()
                     .id("titlebar-drag")
                     .flex_1()
                     .min_w_0()
@@ -864,8 +953,6 @@ impl AppShell {
                     .items_center()
                     .gap_2()
                     .pl_2()
-                    .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
-                    .on_double_click(|_, window, _| window.zoom_window())
                     .child(
                         div()
                             .text_sm()
@@ -873,8 +960,23 @@ impl AppShell {
                             .text_color(fg)
                             .child("Névé"),
                     )
-                    .child(div().text_xs().text_color(muted).child("粒雪 · MPV 管理器")),
-            )
+                    .child(div().text_xs().text_color(muted).child("粒雪 · MPV 管理器"));
+                // Windows：把这块区域登记成系统标题栏拖动区（WM_NCHITTEST 返回
+                // HTCAPTION），拖动、双击最大化、贴边分屏全部由系统接管。
+                //
+                // 关键坑：这里不能再挂 `on_mouse_down`。gpui 一旦把
+                // WM_NCLBUTTONDOWN 判成「已处理」就返回 0，系统收不到拖动消息；
+                // 而 `Window::start_window_move()` 在 Windows 平台层是空实现
+                // （gpui-pre-windows 没有重写它），所以自己接管必然拖不动。
+                #[cfg(windows)]
+                let drag = drag.window_control_area(WindowControlArea::Drag);
+                // 其他平台没有命中测试通道，只能走 gpui 的窗口移动入口。
+                #[cfg(not(windows))]
+                let drag = drag
+                    .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
+                    .on_double_click(|_, window, _| window.zoom_window());
+                drag
+            })
             .child(
                 Button::new("rescan")
                     .label("重新扫描")
@@ -1748,25 +1850,26 @@ impl AppShell {
     // 设置页（外观）
     // -----------------------------------------------------------------------
 
-    /// 百分比行：减号 + 轨道 + 加号 + 数值。
+    /// 百分比行：减号 + 可拖拽滑杆 + 加号 + 数值。
     ///
-    /// 没做拖拽：GPUI 里要拿到指针相对轨道的坐标得额外维护 bounds，
-    /// 加减按钮更稳，且同样能到任意值。
+    /// 轨道用组件库的 `Slider`：**必须**由它自己记录渲染后的 bounds 才能把指针位置换算成值，
+    /// 自己画一条轨道拿不到 bounds（GPUI 的 `Div` 不暴露自己的几何），也就无从做绝对定位。
+    /// 步进 1、范围 0..100，即 1% 精度；拖到元素外仍跟手，松手（含在窗口外松手）才落盘。
+    /// 加减按钮保留为 1% 微调，步进与滑杆一致。
     fn percent_control(
         &self,
         cx: &mut Context<Self>,
         id: &'static str,
         value: u8,
+        state: &Entity<SliderState>,
         set: fn(&mut Appearance, u8),
     ) -> AnyElement {
         let t = cx.theme();
         let muted = t.colors.muted_foreground;
-        let track = t.colors.border.opacity(0.35);
         let fill_color = t.colors.primary;
         let fg = t.colors.foreground;
         let hover = t.colors.secondary;
         const TRACK: f32 = 180.;
-        let fill = (TRACK * (f32::from(value) / 100.)).max(2.);
 
         let minus = h_flex()
             .id(ElementId::Name(SharedString::from(format!("{id}-minus"))))
@@ -1780,7 +1883,7 @@ impl AppShell {
             .cursor_pointer()
             .hover(move |style| style.bg(hover))
             .on_click(cx.listener(move |this, _, window, cx| {
-                let next = value.saturating_sub(5);
+                let next = value.saturating_sub(1);
                 this.update_appearance(window, cx, |appearance| set(appearance, next));
             }))
             .child("−");
@@ -1796,7 +1899,7 @@ impl AppShell {
             .cursor_pointer()
             .hover(move |style| style.bg(hover))
             .on_click(cx.listener(move |this, _, window, cx| {
-                let next = (value + 5).min(100);
+                let next = (value + 1).min(100);
                 this.update_appearance(window, cx, |appearance| set(appearance, next));
             }))
             .child("+");
@@ -1806,13 +1909,12 @@ impl AppShell {
             .gap_3()
             .child(minus)
             .child(
-                div()
+                Slider::new(state)
+                    // 轨道色与填充色都取 `background`（`text_color` 是滑块本体的色）。
                     .w(px(TRACK))
-                    .h(px(4.))
                     .flex_none()
-                    .rounded_full()
-                    .bg(track)
-                    .child(div().w(px(fill)).h(px(4.)).rounded_full().bg(fill_color)),
+                    .bg(fill_color)
+                    .text_color(fg),
             )
             .child(plus)
             .child(
@@ -1962,14 +2064,20 @@ impl AppShell {
             cx,
             "bg-opacity",
             a.background_opacity,
+            &self.opacity_slider,
             |appearance, value| {
                 appearance.background_opacity = value;
             },
         );
-        let lightness_control =
-            self.percent_control(cx, "lightness", a.lightness, |appearance, value| {
+        let lightness_control = self.percent_control(
+            cx,
+            "lightness",
+            a.lightness,
+            &self.lightness_slider,
+            |appearance, value| {
                 appearance.lightness = value;
-            });
+            },
+        );
         let titlebar_control = segmented(
             cx,
             "titlebar",

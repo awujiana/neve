@@ -54,7 +54,7 @@ fn main() {
         };
         // open_window 会自动挂载 Root（组件库主题/弹层宿主）
         if let Err(error) = open_window(options, cx, move |_window, cx| {
-            cx.new(|_| ui::AppShell::new(players, panels, appearance))
+            cx.new(|cx| ui::AppShell::new(players, panels, appearance, cx))
         }) {
             eprintln!("无法打开 Névé 主窗口：{error}");
         }

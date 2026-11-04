@@ -52,6 +52,8 @@
    - **不要给背景加装饰光斑**。曾经用 `ui::glow()`（64 层同心圆叠径向衰减）在右上/左下放两处柔光，实测在半透底上会显出圆形轮廓，已整体移除；背景只保留一层斜向渐变。GPUI 也没有径向渐变与大半径模糊（`blur_radius` 几百像素会因采样精度不足出现多边形棱边），别再尝试这条路。
    - **压在半透底色上的文字不能用次级色**：窗口底色是半透的，深色壁纸会把它拉到中灰（实测 151/255），次级灰字只有 2.7:1。页头说明一类直接落在底色上的文字一律用 `foreground`，层级靠字号与字重区分；只有落在 `surface` 面板上的文字才用 `muted_foreground`。改完用 `scripts/probe_contrast.py` 量一遍，正文要 ≥ 4.5:1。
    - **亮端底色不透明度有下限 0.78**：纯黑桌面上，底色不透明度要 ≈0.70 才能把窗口底抬到 ≈175/255 让正文压住 AA。下限只随明暗上升，深色端仍是 0.20——想要极透就把明暗拉到暗端，两条线互不干扰。
+   - **窗口拖动只能走 `window_control_area(WindowControlArea::Drag)`**：`Window::start_window_move()` 在 Windows 平台层是空实现，自己接管必然拖不动；而拖动区一旦挂 `on_mouse_down`，gpui 会把 `WM_NCLBUTTONDOWN` 判成已处理、返回 0，系统的原生拖动也被掐断。两者不要同时用（非 Windows 分支才保留 `start_window_move`）。改完用 `scripts/probe_drag.py` 实测位移，别靠双击最大化生效来推断拖动也能用。
+   - **滑杆必须挂在 `Entity<SliderState>` 上**：`SliderState` 自己记录渲染后的 `bounds` 才能把指针换算成值，自绘 `Div` 轨道做不到。默认 `0..100 / step 1` 正好是 1% 精度，显式写出来防止组件库改默认值。`SliderEvent::Change` 拖拽中连续发出、只改内存；`Release` 才落盘。`cx.subscribe()` 返回 `#[must_use]` 的 `Subscription`，末尾要 `.detach()`。
    - 不要把窗口控制按钮换回组件库的 `TitleBar`：其按钮依赖 SVG 资源，资源缺失时整块区域不可见。
 4. **README 风格**：顶部 shields.io 徽章（`<p align="center">` 纯 HTML 居中）→ 双名标题 → 语言切换徽章 + 文档导航 → `[!WARNING]` AI 声明 → 目录 → 正文 → 底部三节（关联仓库 / 作者联系方式 / 开源协议）。
 5. **双名标题**：README 顶部**中文名 `<h1>Névé 粒雪</h1>` 在上、GitHub 仓库名 `<h2>neve</h2>` 在下**，两者都要有。
