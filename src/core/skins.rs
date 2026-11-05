@@ -182,6 +182,69 @@ pub struct ControlItem {
     pub tooltip: Option<String>,
     /// `gap` / `speed` 的尺寸系数
     pub scale: f32,
+    /// 可见性条件：外层是「或」（逗号分隔的组），内层是「与」（`+` 连接），
+    /// 布尔表示是否带 `!` 取反。空表示无条件可见。
+    ///
+    /// uosc 的写法是 `<video,audio>`（有视频**或**有音频）、`<has_audio+!audio>`
+    /// （有音轨且当前不是纯音频）、`<!idle>`（非空闲）。真实整合包的 `controls=`
+    /// 里几乎每个条目都带条件，忽略它就会把 20 多个图标全画出来，和实机完全不同。
+    pub dispositions: Vec<Vec<(String, bool)>>,
+}
+
+/// 预览里模拟的播放状态，用来求值 `dispositions`。
+///
+/// 字段名与 uosc 的判定名一一对应：`has_*` 直接叫 `has_*`，`is_*` 在 uosc 里写作
+/// `video` / `audio` / `image` / `idle` / `stream`（`Controls.lua` 会给它们加 `is_` 前缀）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaybackState {
+    pub is_idle: bool,
+    pub is_video: bool,
+    pub is_audio: bool,
+    pub is_image: bool,
+    pub is_stream: bool,
+    pub has_video: bool,
+    pub has_audio: bool,
+    pub has_image: bool,
+    pub has_sub: bool,
+    pub has_chapter: bool,
+    pub has_playlist: bool,
+    pub has_many_edition: bool,
+}
+
+impl PlaybackState {
+    /// 预览画布模拟的是一段带字幕、带章节的视频。
+    pub const SAMPLE_VIDEO: Self = Self {
+        is_idle: false,
+        is_video: true,
+        is_audio: false,
+        is_image: false,
+        is_stream: false,
+        has_video: true,
+        has_audio: true,
+        has_image: false,
+        has_sub: true,
+        has_chapter: true,
+        has_playlist: false,
+        has_many_edition: false,
+    };
+
+    fn get(&self, name: &str) -> bool {
+        match name {
+            "is_idle" | "idle" => self.is_idle,
+            "is_video" | "video" => self.is_video,
+            "is_audio" | "audio" => self.is_audio,
+            "is_image" | "image" => self.is_image,
+            "is_stream" | "stream" => self.is_stream,
+            "has_video" => self.has_video,
+            "has_audio" => self.has_audio,
+            "has_image" => self.has_image,
+            "has_sub" => self.has_sub,
+            "has_chapter" => self.has_chapter,
+            "has_playlist" => self.has_playlist,
+            "has_many_edition" => self.has_many_edition,
+            _ => false,
+        }
+    }
 }
 
 impl ControlItem {
@@ -194,6 +257,18 @@ impl ControlItem {
                 self.tooltip.clone().unwrap_or_else(|| self.icon.clone())
             }
         }
+    }
+
+    /// 在当前播放状态下是否可见。条件为空表示永远可见。
+    pub fn visible_in(&self, state: &PlaybackState) -> bool {
+        if self.dispositions.is_empty() {
+            return true;
+        }
+        self.dispositions.iter().any(|group| {
+            group
+                .iter()
+                .all(|(name, expected)| state.get(name) == *expected)
+        })
     }
 }
 
@@ -269,8 +344,32 @@ pub struct SkinPreset {
     pub kind: SkinKind,
     pub config_dir: Option<PathBuf>,
     pub source_path: Option<PathBuf>,
+    /// uosc 用的 Material Icons 字体文件，存在时预览直接用真字形渲染图标。
+    pub icon_font: Option<PathBuf>,
     pub layout: UoscLayout,
     pub note: String,
+}
+
+/// 在播放器配置目录里找 uosc 的图标字体。
+///
+/// uosc 的图标不是画出来的，是 `fonts/` 里 `MaterialIconsRound-Regular.otf` 的连字
+/// 字形（`ass.lua` 里 `opts.font = 'MaterialIconsRound-Regular'`）。预览要画得一样，
+/// 就必须用同一个字体文件，而不是自己拼几何形状。
+pub fn find_icon_font(config_dir: &Path) -> Option<PathBuf> {
+    let fonts = config_dir.join("fonts");
+    let preferred = fonts.join("MaterialIconsRound-Regular.otf");
+    if preferred.is_file() {
+        return Some(preferred);
+    }
+    let entries = fs::read_dir(&fonts).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = path.file_name()?.to_string_lossy().to_lowercase();
+        if name.contains("material") && (name.ends_with(".otf") || name.ends_with(".ttf")) {
+            return Some(path);
+        }
+    }
+    None
 }
 
 impl SkinPreset {
@@ -354,6 +453,106 @@ fn split_control_list(value: &str) -> Vec<&str> {
 /// `[<disposition>]{element}[:{param}][#{badge}[>{limit}]][?{tooltip}]`，
 /// 其中 `command:` / `button:` / `cycle:` / `toggle:` 的**第一个参数就是图标名**。
 /// 之前只留元素名会把它们统统压成 `command` / `button`，预览里自然只剩一排小圆点。
+/// uosc `elements/Controls.lua` 里 `shorthands` 表的等价物：别名 → 展开后的配置。
+///
+/// 这张表必须照抄，原因有两层：
+///
+/// 1. `open-file` / `menu` / `subtitles` 这些是**别名**，不是图标名。uosc 先展开成
+///    `command:folder:…` / `command:menu_book:…`，图标取的是展开后的第一个参数。
+///    不展开就会拿别名去查字形，字体里根本没有这些连字。
+/// 2. 冒号后的第一个参数就是 Material Icons 的连字名（`folder` / `menu_book` /
+///    `closed_caption` …）。预览用同一个字体渲染同一个字符串，字形才能和 mpv 一致。
+const CONTROL_SHORTHANDS: &[(&str, &str)] = &[
+    ("play-pause", "cycle:pause:pause:no/yes=play_arrow"),
+    ("menu", "command:menu_book:script-binding uosc/menu-blurred"),
+    (
+        "subtitles",
+        "command:closed_caption:script-binding uosc/subtitles",
+    ),
+    ("audio", "command:graphic_eq:script-binding uosc/audio"),
+    (
+        "audio-device",
+        "command:speaker:script-binding uosc/audio-device",
+    ),
+    ("video", "command:smart_display:script-binding uosc/video"),
+    ("playlist", "command:list_alt:script-binding uosc/playlist"),
+    (
+        "chapters",
+        "command:library_books:script-binding uosc/chapters",
+    ),
+    (
+        "editions",
+        "command:movie_filter:script-binding uosc/editions",
+    ),
+    (
+        "stream-quality",
+        "command:high_quality:script-binding uosc/stream-quality",
+    ),
+    ("open-file", "command:folder:script-binding uosc/open-file"),
+    ("items", "command:list_alt:script-binding uosc/items"),
+    ("prev", "command:arrow_back_ios:script-binding uosc/prev"),
+    ("next", "command:arrow_forward_ios:script-binding uosc/next"),
+    ("first", "command:first_page:script-binding uosc/first"),
+    ("last", "command:last_page:script-binding uosc/last"),
+    ("loop-playlist", "cycle:repeat:loop-playlist:no/inf!"),
+    ("loop-file", "cycle:repeat_one:loop-file:no/inf!"),
+    ("shuffle", "toggle:shuffle:shuffle"),
+    ("autoload", "toggle:hdr_auto:autoload@uosc"),
+    (
+        "fullscreen",
+        "cycle:crop_free:fullscreen:no/yes=fullscreen_exit!",
+    ),
+];
+
+/// 把控制条里的别名展开成 uosc 实际使用的配置串。未命中别名则原样返回。
+fn expand_control_shorthand(item: &str) -> &str {
+    CONTROL_SHORTHANDS
+        .iter()
+        .find(|(name, _)| *name == item)
+        .map(|(_, expansion)| *expansion)
+        .unwrap_or(item)
+}
+
+/// 解析 `<...>` 里的可见性条件。
+///
+/// 语法：逗号分隔的「或」组，组内用 `+` 连接「与」条件，`!` 前缀表示取反。
+/// - `<video,audio>` → 有视频**或**有音频
+/// - `<has_audio+!audio>` → 有音轨**且**当前不是纯音频
+/// - `<!idle>` → 非空闲
+///
+/// uosc 会给 `video` / `audio` / `image` / `idle` / `stream` 补 `is_` 前缀，`has_*`
+/// 保持原样；这里统一补好，求值时按名字查 `PlaybackState`。
+fn parse_dispositions(value: &str) -> Vec<Vec<(String, bool)>> {
+    value
+        .split(',')
+        .map(|group| {
+            group
+                .split('+')
+                .filter_map(|condition| {
+                    let condition = condition.trim();
+                    if condition.is_empty() {
+                        return None;
+                    }
+                    let (name, expected) = match condition.strip_prefix('!') {
+                        Some(rest) => (rest.trim(), false),
+                        None => (condition, true),
+                    };
+                    if name.is_empty() {
+                        return None;
+                    }
+                    let name = if name.starts_with("has_") || name.starts_with("is_") {
+                        name.to_string()
+                    } else {
+                        format!("is_{name}")
+                    };
+                    Some((name, expected))
+                })
+                .collect::<Vec<_>>()
+        })
+        .filter(|group: &Vec<(String, bool)>| !group.is_empty())
+        .collect()
+}
+
 pub fn parse_controls(value: &str) -> Vec<ControlItem> {
     let mut out = Vec::new();
     for raw in split_control_list(value) {
@@ -361,9 +560,11 @@ pub fn parse_controls(value: &str) -> Vec<ControlItem> {
         if item.is_empty() {
             continue;
         }
-        // 可见性前缀 <...>
+        // 可见性前缀 <...>：uosc 的写法是「或组」，组内用 `+` 表示「与」，`!` 取反。
+        let mut dispositions = Vec::new();
         if item.starts_with('<') {
             let Some(end) = item.find('>') else { continue };
+            dispositions = parse_dispositions(&item[1..end]);
             item = &item[end + 1..];
         }
         // 徽标 #{badge}[>{limit}]：先截断，后面的提示与参数才干净
@@ -381,6 +582,8 @@ pub fn parse_controls(value: &str) -> Vec<ControlItem> {
             }
             None => (item, None),
         };
+        // 别名必须在拆参数之前展开，否则拿到的是别名而不是图标名。
+        let item = expand_control_shorthand(item.trim());
         let (name, param) = match item.split_once(':') {
             Some((name, param)) => (name.trim(), Some(param.trim())),
             None => (item.trim(), None),
@@ -400,18 +603,21 @@ pub fn parse_controls(value: &str) -> Vec<ControlItem> {
                 icon: String::new(),
                 tooltip,
                 scale: 1.,
+                dispositions,
             },
             "gap" => ControlItem {
                 kind: ControlKind::Gap,
                 icon: String::new(),
                 tooltip,
                 scale: scale_of(0.3),
+                dispositions,
             },
             "speed" => ControlItem {
                 kind: ControlKind::Speed,
                 icon: "speed".to_string(),
                 tooltip,
                 scale: scale_of(1.3),
+                dispositions,
             },
             "command" | "button" | "cycle" | "toggle" => ControlItem {
                 kind: ControlKind::Button,
@@ -424,12 +630,14 @@ pub fn parse_controls(value: &str) -> Vec<ControlItem> {
                     .to_string(),
                 tooltip,
                 scale: 1.,
+                dispositions,
             },
             shorthand => ControlItem {
                 kind: ControlKind::Button,
                 icon: shorthand.to_string(),
                 tooltip,
                 scale: 1.,
+                dispositions,
             },
         };
         out.push(control);
@@ -448,6 +656,7 @@ pub fn scan_skins(players: &[DetectedPlayer]) -> Vec<SkinPreset> {
         kind: SkinKind::BuiltinOsc,
         config_dir: None,
         source_path: None,
+        icon_font: None,
         layout: UoscLayout::default(),
         note: "经典底部时间条与按钮行；切换后 mpv.conf 的 osc=no 会被注释掉".to_string(),
     }];
@@ -471,6 +680,7 @@ pub fn scan_skins(players: &[DetectedPlayer]) -> Vec<SkinPreset> {
             kind: SkinKind::Uosc,
             config_dir: Some(dir.to_path_buf()),
             source_path: Some(conf),
+            icon_font: find_icon_font(dir),
             note: layout.palette.summary(),
             layout,
         });
@@ -483,6 +693,7 @@ pub fn scan_skins(players: &[DetectedPlayer]) -> Vec<SkinPreset> {
             kind: SkinKind::Uosc,
             config_dir: None,
             source_path: None,
+            icon_font: None,
             layout: UoscLayout::default(),
             note: "没有检测到 uosc.conf，这里展示官方默认配色与控件布局".to_string(),
         });
@@ -678,9 +889,10 @@ mod tests {
             "space,fullscreen",
         ));
         let icons: Vec<&str> = controls.iter().map(|item| item.icon.as_str()).collect();
+        // `open-file` / `fullscreen` 是 uosc 的别名，展开后才是真图标名。
         assert_eq!(
             icons,
-            vec!["open-file", "history", "", "toggle_on", "", "fullscreen"]
+            vec!["folder", "history", "", "toggle_on", "", "crop_free"]
         );
         assert_eq!(controls[0].kind, ControlKind::Button);
         assert_eq!(controls[2].kind, ControlKind::Gap);
@@ -691,10 +903,87 @@ mod tests {
     }
 
     #[test]
+    fn shorthands_expand_to_material_icon_names() {
+        // 别名不展开就会拿 `menu` / `subtitles` 去查字形，字体里没有这些连字。
+        let cases = [
+            ("menu", "menu_book"),
+            ("subtitles", "closed_caption"),
+            ("audio", "graphic_eq"),
+            ("video", "smart_display"),
+            ("playlist", "list_alt"),
+            ("chapters", "library_books"),
+            ("open-file", "folder"),
+            ("prev", "arrow_back_ios"),
+            ("loop-playlist", "repeat"),
+            ("loop-file", "repeat_one"),
+            ("shuffle", "shuffle"),
+            ("fullscreen", "crop_free"),
+            ("play-pause", "pause"),
+        ];
+        for (shorthand, icon) in cases {
+            let controls = parse_controls(shorthand);
+            assert_eq!(controls.len(), 1, "{shorthand} 应解析出一项");
+            assert_eq!(controls[0].icon, icon, "{shorthand} 应展开成 {icon}");
+        }
+    }
+
+    #[test]
+    fn dispositions_follow_playback_state() {
+        let controls = parse_controls(concat!(
+            "open-file,<idle>command:history:x?最近播放,<video>video,",
+            "<has_chapter>chapters,<has_audio+!audio>audio,<video,audio>subtitles",
+        ));
+        let state = PlaybackState::SAMPLE_VIDEO;
+        let visible: Vec<&str> = controls
+            .iter()
+            .filter(|item| item.visible_in(&state))
+            .map(|item| item.icon.as_str())
+            .collect();
+        // `<idle>` 在有视频时隐藏；`<has_audio+!audio>` 因当前是视频（非纯音频）而可见。
+        assert_eq!(
+            visible,
+            vec![
+                "folder",
+                "smart_display",
+                "library_books",
+                "graphic_eq",
+                "closed_caption"
+            ]
+        );
+        assert!(!controls[1].visible_in(&state), "`<idle>` 在播放时应隐藏");
+    }
+
+    #[test]
+    fn disposition_or_group_matches_any_branch() {
+        let controls = parse_controls("<video,audio>subtitles");
+        assert_eq!(controls[0].dispositions.len(), 2, "逗号是「或」组");
+        let video_only = PlaybackState {
+            is_video: true,
+            is_audio: false,
+            ..PlaybackState::SAMPLE_VIDEO
+        };
+        let audio_only = PlaybackState {
+            is_video: false,
+            is_audio: true,
+            ..PlaybackState::SAMPLE_VIDEO
+        };
+        let image = PlaybackState {
+            is_video: false,
+            is_audio: false,
+            is_image: true,
+            ..PlaybackState::SAMPLE_VIDEO
+        };
+        assert!(controls[0].visible_in(&video_only));
+        assert!(controls[0].visible_in(&audio_only));
+        assert!(!controls[0].visible_in(&image), "纯图片时字幕按钮应隐藏");
+    }
+
+    #[test]
     fn control_prefix_with_comma_is_not_split() {
         let controls = parse_controls("<video,audio>subtitles,<audio,has_image+!video>image,space");
         let icons: Vec<&str> = controls.iter().map(|item| item.icon.as_str()).collect();
-        assert_eq!(icons, vec!["subtitles", "image", ""]);
+        // `subtitles` 是别名，展开后是 `closed_caption`。
+        assert_eq!(icons, vec!["closed_caption", "image", ""]);
         assert_eq!(controls.len(), 3, "前缀里的逗号不能当成条目分隔符");
     }
 

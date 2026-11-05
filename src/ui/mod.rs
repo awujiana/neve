@@ -49,7 +49,7 @@ use crate::core::scripts::uosc::{
 use crate::core::scripts::{
     DependencyIssue, ScriptEntry, disable_script, enable_script, list_scripts, scan_dependencies,
 };
-use crate::core::skins::{SkinPreset, apply_skin, scan_skins};
+use crate::core::skins::{PlaybackState, SkinPreset, apply_skin, scan_skins};
 use crate::core::sync::{ConflictPolicy, SyncKind, SyncPlan, apply_sync, plan_script_sync};
 
 use mpv_preview::PreviewTone;
@@ -4508,10 +4508,18 @@ impl AppShell {
         body = body.child(preview);
 
         // --- 预览里画了什么 ---
+        // 只列画布上真正画出来的那些：真实 `controls=` 的条目大多带可见性条件。
+        let sample_state = PlaybackState::SAMPLE_VIDEO;
+        let shown_controls = layout
+            .controls
+            .iter()
+            .filter(|item| item.visible_in(&sample_state))
+            .count();
         let controls: Vec<String> = layout
             .controls
             .iter()
-            .take(10)
+            .filter(|item| item.visible_in(&sample_state))
+            .take(12)
             .map(|item| item.label())
             .collect();
         let mut explanation = card(cx).gap_1();
@@ -4544,6 +4552,10 @@ impl AppShell {
                 layout.controls_margin,
                 layout.opacity.controls
             ),
+            format!(
+                "可见性：按 `<video>` / `<idle>` / `<has_chapter>` 等条件求值（示例画面按「有视频 + 有音轨 + 有字幕 + 有章节」），当前可见 {} 项",
+                shown_controls
+            ),
             format!("控制条元素：{}", controls.join(" / ")),
             format!(
                 "菜单：居中 · {}px/项 · 最窄 {}px · 圆角 {}px · 缩放 {}×",
@@ -4558,7 +4570,7 @@ impl AppShell {
             div()
                 .text_xs()
                 .text_color(muted)
-                .child("近似说明：图标用字体字形代替 uosc 内嵌的 Material Icons；GPUI 没有文字描边与 shader，滤镜对画面的影响用色调近似，不假装真的跑了 GLSL。"),
+                .child("近似说明：图标直接加载整合包 fonts/ 下的 MaterialIconsRound-Regular.otf，用与 uosc 相同的连字渲染，字形一致；差异只在光栅化（hinting / 抗锯齿）与 libass 不同。GPUI 没有文字描边与 shader，滤镜对画面的影响用色调近似，不假装真的跑了 GLSL。"),
         );
         body = body.child(explanation);
 

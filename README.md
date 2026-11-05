@@ -157,7 +157,7 @@
   </tr>
 </table>
 
-皮肤页把每套方案画成一张 16:9 的静态预览。uosc 那一支不是「画个像播放器的图」，而是照 `uosc` 源码逐条复刻：配色只用 `config_defaults.color` 里真实存在的 10 个键，`top_bar_size` / `timeline_size` / `controls_size` 一类默认值取官方值，顶栏按实机是**左上两行小字**（没有通栏底色），控制条按 `opacity.controls=0` 画成**裸图标**、放不下时从中间往外左右交替隐藏，时间戳在已播放段上**反色**（设计见[架构文档](docs/架构文档.md) §5.12）：
+皮肤页把每套方案画成一张 16:9 的静态预览。uosc 那一支不是「画个像播放器的图」，而是照 `uosc` 源码逐条复刻：配色只用 `config_defaults.color` 里真实存在的 10 个键，`top_bar_size` / `timeline_size` / `controls_size` 一类默认值取官方值，顶栏按实机是**左上两行小字**（没有通栏底色），控制条按 `opacity.controls=0` 画成**裸图标**、放不下时从中间往外左右交替隐藏，时间戳在已播放段上**反色**；**图标加载的是整合包 `fonts/` 下那个 Material Icons 字体**，按 uosc 的做法把图标名当文本渲染，靠连字映射字形——不是自己拼形状。控制条条目还按 `<video>` / `<idle>` / `<has_chapter>` 这些可见性条件求值，所以画出来的数量和实机一致（设计见[架构文档](docs/架构文档.md) §5.12）：
 
 <table align="center">
   <tr>

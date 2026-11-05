@@ -17,9 +17,15 @@
 //! 的视图，因为它要如实还原第三方皮肤配色。
 //!
 //! 已知近似（不假装是像素级复刻）：
-//! - 图标是用 `div` 拼的几何形状，不是 uosc 内嵌的 Material Icons 字体；
+//! - 图标用 uosc **同一个** Material Icons 字体渲染同一个连字（见 `load_icon_font`），
+//!   字形一致；只有光栅化（hinting / 抗锯齿）与 libass 不同，逐像素不会完全相同。
+//!   字体缺失时才退回 `fallback_icon_shape` 的几何拼图；
 //! - GPUI 没有文字描边，`text_border` 用极淡的深色底衬代替；
-//! - 没有 shader，滤镜对画面的影响用**色调近似**表达「画面会变」。
+//! - 没有 shader，滤镜对画面的影响用**色调近似**表达「画面会变」；
+//! - 背后没有真实解码帧，画面内容是静态示意。
+
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::{
@@ -27,13 +33,52 @@ use gpui_kit::{
     prelude::*, px,
 };
 
-use crate::core::skins::{ControlItem, ControlKind, SkinKind, SkinPalette, SkinPreset, UoscLayout};
+use crate::core::skins::{
+    ControlItem, ControlKind, PlaybackState, SkinKind, SkinPalette, SkinPreset, UoscLayout,
+};
 
 use super::theme;
 
 /// 画布按 16:9 画一个真实的播放器窗口。
 const CANVAS_W: f32 = 720.;
 const CANVAS_H: f32 = 405.;
+
+/// uosc 图标字体的族名，取自字体 `name` 表 nameID 1。
+///
+/// uosc 的 `ass.lua` 里写的是 `opts.font = 'MaterialIconsRound-Regular'`（那是 PostScript
+/// 名），libass 认这个；GPUI 走 fontdb，按**家族名**匹配，所以要写 `Material Icons Round`。
+const ICON_FONT_FAMILY: &str = "Material Icons Round";
+
+/// 图标字体是否已成功加载。没加载时退回几何拼图。
+static ICON_FONT_READY: AtomicBool = AtomicBool::new(false);
+
+/// 把 uosc 的 Material Icons 字体装进 GPUI 的字体库。
+///
+/// uosc 画图标的方式是**把图标名当文本渲染**（`ass:icon` → `ass:txt(…, name)`），
+/// 由字体的 `liga` 连字把 `folder` / `menu_book` 这类名字替换成字形。所以要画得和
+/// mpv 一样，唯一正确的做法是加载同一个字体文件、渲染同一个字符串，而不是自己
+/// 用矩形和圆环拼形状。
+///
+/// 返回是否加载成功；失败时预览退回 `fallback_icon_shape`。
+pub fn load_icon_font(cx: &App, path: &Path) -> bool {
+    let Ok(bytes) = std::fs::read(path) else {
+        return false;
+    };
+    if cx
+        .text_system()
+        .add_fonts(vec![std::borrow::Cow::Owned(bytes)])
+        .is_err()
+    {
+        return false;
+    }
+    ICON_FONT_READY.store(true, Ordering::Relaxed);
+    true
+}
+
+/// 图标字体是否可用（决定用真字形还是几何兜底）。
+pub fn icon_font_ready() -> bool {
+    ICON_FONT_READY.load(Ordering::Relaxed)
+}
 
 /// 时间轴已播放比例（示例画面 18:24 / 44:36）。
 const PLAYED: f32 = 0.42;
@@ -136,8 +181,10 @@ pub fn render_mpv_preview(
         // 再叠一层字幕会糊成一片，所以 uosc 分支不画字幕。
         SkinKind::Uosc => window
             .child(uosc_top_bar(layout, palette))
-            .child(uosc_menu(layout, palette))
-            .child(uosc_bottom(layout, palette)),
+            // 菜单最后画：uosc 把菜单当独立浮层压在控制条之上，
+            // 先画控制条会让图标从菜单面板里透出来。
+            .child(uosc_bottom(layout, palette))
+            .child(uosc_menu(layout, palette)),
         SkinKind::BuiltinOsc => window
             .child(subtitle_line(layout, palette))
             .child(builtin_top_hint(palette))
@@ -344,7 +391,16 @@ fn controls_row(
     margin: f32,
 ) -> Div {
     let fg = theme::color(palette.foreground);
-    let visible = fit_controls(&layout.controls, size, spacing, margin);
+    // 先按模拟的播放状态过滤：真实 `controls=` 里绝大多数条目都带 `<video>` /
+    // `<idle>` / `<has_chapter>` 这类条件，不过滤会把二十多个图标全画出来。
+    let state = PlaybackState::SAMPLE_VIDEO;
+    let shown: Vec<ControlItem> = layout
+        .controls
+        .iter()
+        .filter(|item| item.visible_in(&state))
+        .cloned()
+        .collect();
+    let visible = fit_controls(&shown, size, spacing, margin);
     let mut row = h_flex()
         .w_full()
         .h(px(size))
@@ -352,7 +408,7 @@ fn controls_row(
         .mb(px(margin))
         .items_center()
         .gap(px(spacing));
-    for (item, show) in layout.controls.iter().zip(visible) {
+    for (item, show) in shown.iter().zip(visible) {
         if show {
             row = row.child(control_cell(item, size, fg));
         }
@@ -420,16 +476,39 @@ fn control_cell(item: &ControlItem, size: f32, fg: Hsla) -> Div {
             .flex_none()
             .items_center()
             .justify_center()
-            .child(icon_shape(&item.icon, size * 0.62, fg)),
+            .child(icon_glyph(&item.icon, size * 0.7, fg)),
     }
 }
 
-/// 用几何形状拼一个图标。
+/// 画一个 uosc 图标。
 ///
-/// uosc 用的是内嵌 Material Icons 字体，GPUI 这边没有那套资源，
-/// 所以按图标的语义拼形状：文件夹、放大镜、开关、九宫格、柱状图、图片、
-/// 画中画、全屏角标……比随机字形像得多。
-fn icon_shape(icon: &str, size: f32, color: Hsla) -> Div {
+/// 走的是**真字形**：把 uosc 的图标名当文本、用 uosc 自己的 Material Icons 字体渲染。
+/// `Button.lua` 里 `font_size = round((by - ay) * 0.7)`，所以字号是按钮边长的 0.7 倍；
+/// 行高也设成同一个值，让文字行盒等于 em 盒，图标才能在按钮里居中（默认行高约 1.2em，
+/// 直接用会把图标往下压）。
+fn icon_glyph(icon: &str, size: f32, color: Hsla) -> Div {
+    if !icon_font_ready() {
+        return fallback_icon_shape(icon, size, color);
+    }
+    div()
+        .w(px(size))
+        .h(px(size))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .font_family(ICON_FONT_FAMILY)
+        .text_size(px(size))
+        .line_height(px(size))
+        .text_color(color)
+        .child(icon.to_string())
+}
+
+/// 字体缺失时的几何兜底：按图标语义拼形状。
+///
+/// 只在 `load_icon_font` 失败时用到（例如播放器没带 `fonts/MaterialIconsRound-Regular.otf`）。
+/// 正常路径走 `icon_glyph` 的真字形——形状拼得再像也不是 uosc 的图标。
+fn fallback_icon_shape(icon: &str, size: f32, color: Hsla) -> Div {
     let s = size;
     let base = div().relative().w(px(s)).h(px(s)).flex_none();
     match icon {
@@ -843,13 +922,15 @@ fn uosc_menu(layout: &UoscLayout, palette: SkinPalette) -> Div {
     let selected = alpha(palette.foreground, layout.opacity.menu * 0.15);
     let icon = alpha(palette.background_text, 0.85);
 
+    // 图标名一律用 uosc 真实的 Material Icons 连字名（见 main.lua 的主菜单定义），
+    // 不能写 `playlist` / `audio` 这类 shorthand 别名——字体里没有那些连字。
     let items = [
-        ("playlist", "播放列表", "›"),
-        ("chapters", "章节", "›"),
-        ("audio", "音轨", "›"),
-        ("subtitles", "字幕", "›"),
-        ("video", "视频", "›"),
-        ("tune", "设置", "›"),
+        ("list_alt", "播放列表", "›"),
+        ("library_books", "章节", "›"),
+        ("graphic_eq", "音轨", "›"),
+        ("closed_caption", "字幕", "›"),
+        ("smart_display", "视频", "›"),
+        ("settings", "设置", "›"),
     ];
     let footnote_h = (item_h * 0.72).max(16.);
     let height = pad * 2. + item_h + item_h * items.len() as f32 + footnote_h;
@@ -888,7 +969,8 @@ fn uosc_menu(layout: &UoscLayout, palette: SkinPalette) -> Div {
                 .items_center()
                 .rounded(px(radius))
                 .when(first, move |this| this.bg(selected))
-                .child(icon_shape(icon_name, item_h * 0.5, icon))
+                // Menu.lua：图标字号 = item_height * 0.48 * font_scale，再乘 1.5
+                .child(icon_glyph(icon_name, item_h * 0.48 * 1.5, icon))
                 .child(
                     div()
                         .flex_1()

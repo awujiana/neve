@@ -35,6 +35,21 @@ fn main() {
     application().run(move |cx: &mut App| {
         // 组件库初始化必须在任何组件使用之前
         init(cx);
+        // 皮肤预览要把 uosc 的图标画成真字形，得先把它的 Material Icons 字体装进字体库。
+        // 字体随播放器整合包放在 `fonts/` 下，取第一个能找到的即可。
+        let icon_font = players
+            .iter()
+            .filter_map(|player| player.config_dir.as_deref())
+            .find_map(core::skins::find_icon_font);
+        match icon_font.as_deref() {
+            Some(path) if ui::mpv_preview::load_icon_font(cx, path) => {
+                eprintln!("[fonts] 已加载 uosc 图标字体：{}", path.display());
+            }
+            Some(path) => eprintln!("[fonts] 图标字体加载失败：{}", path.display()),
+            None => {
+                eprintln!("[fonts] 未找到 MaterialIconsRound-Regular.otf，皮肤预览将退回几何图标")
+            }
+        }
         // 把外观设置投影到语义色槽位（液态玻璃不区分明暗主题）
         ui::apply_theme(cx, appearance.clone());
 
