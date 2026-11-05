@@ -21,12 +21,15 @@
 | `src/core/config/` | 无损 conf 解析（语义层 + 原文层双表示）、input 绑定、冲突检测、扫描报告、配置工作区逐行视图 | ✅ |
 | `src/core/config/document.rs` | 配置目录扫描、逐行视图（注释 / 行尾说明 / 注释归属 / 生效关系）、值级编辑与撤回；`ui` 配置页的唯一数据源 | ✅ |
 | `src/core/scripts/` | 脚本枚举、启停、依赖扫描；`uosc.rs` 为 uosc 专项 | ✅ |
+| `src/core/filters.rs` | 滤镜清单（视频滤镜 / 着色器 / 配置组）与**注释式**开关 | ✅ |
+| `src/core/skins.rs` | 皮肤方案与 uosc 配置读取（`SkinPalette` / `SkinOpacity` / `UoscLayout`） | ✅ |
 | `src/core/sync.rs` | 跨包同步的计划与执行（FR-03） | ✅ |
 | `src/core/backup.rs` | 写前备份与撤回，**所有写操作的必经之路** | ✅ |
 | `src/core/store.rs` | 数据目录定位（便携版优先） | ✅ |
-| `src/ui/mod.rs` | 页面骨架、侧栏、概览页 / 播放器页 / 配置页 / 玻璃实验室与交互动作 | ✅ |
+| `src/ui/mod.rs` | 页面骨架、侧栏、概览页 / 播放器页 / 脚本页 / 滤镜页 / 皮肤页 / 配置页 / 备份同步页 / 玻璃实验室与交互动作 | ✅ |
 | `src/ui/theme.rs` | 设计令牌 → `ThemeColor` 语义槽位的投影 | ✅ |
 | `src/ui/glass/` | 液态玻璃组件库：参数(`spec`) / 解析(`resolve`) / 组件(`surface`) 三层 | ✅ |
+| `src/ui/mpv_preview.rs` | mpv 皮肤与 uosc UI 的静态预览画布（唯一允许用字面量 `0xRRGGBB` 的视图） | ✅ |
 | `docs/` | 设计文档、架构文档、UI 规范、质量门禁、`screenshots/` | ✅ |
 | `config/ui-theme.toml` | 主题令牌的设计基线（运行时取值固化在 `ui/theme.rs`） | ✅ |
 | `scripts/` | `update_badges.py`（徽章生成）、`badges.config.json`（唯一数据源） | ✅ |
@@ -62,6 +65,12 @@
    - **亮端底色不透明度有下限 0.78**：纯黑桌面上，底色不透明度要 ≈0.70 才能把窗口底抬到 ≈175/255 让正文压住 AA。下限只随明暗上升，深色端仍是 0.20——想要极透就把明暗拉到暗端，两条线互不干扰。
    - **窗口拖动只能走 `window_control_area(WindowControlArea::Drag)`**：`Window::start_window_move()` 在 Windows 平台层是空实现，自己接管必然拖不动；而拖动区一旦挂 `on_mouse_down`，gpui 会把 `WM_NCLBUTTONDOWN` 判成已处理、返回 0，系统的原生拖动也被掐断。两者不要同时用（非 Windows 分支才保留 `start_window_move`）。改完用 `scripts/probe_drag.py` 实测位移，别靠双击最大化生效来推断拖动也能用。
    - **滑杆必须挂在 `Entity<SliderState>` 上**：`SliderState` 自己记录渲染后的 `bounds` 才能把指针换算成值，自绘 `Div` 轨道做不到。默认 `0..100 / step 1` 正好是 1% 精度，显式写出来防止组件库改默认值。`SliderEvent::Change` 拖拽中连续发出、只改内存；`Release` 才落盘。`cx.subscribe()` 返回 `#[must_use]` 的 `Subscription`，末尾要 `.detach()`。
+   - **滤镜切换只做注释 / 取消注释**：`core::filters` 的 `toggle_line()` / `toggle_profile()` 只在行首加 / 去 `# `，**不改命令本身**。理由同 §「双表示无损渲染」——真实 `input.conf` 里有对齐空格、行尾说明与条件前缀，重写命令必然丢。写前必须经 `BackupManager::backup_file`。实测一次切换只多 2 字节。
+   - **`SkinPalette` 严格对齐 uosc 的 10 个配色键**：`main.lua` 的 `config_defaults.color` 只有 `foreground` / `foreground_text` / `background` / `background_text` / `window_border` / `curtain` / `success` / `error` / `match` / `heatmap`。**不要自造 `menu_*` / `timeline_track` / `time_current` 这类键**——uosc 根本没有，造出来只会让预览变成另一套配色。`SkinOpacity` 与 `UoscLayout` 的默认值同理，一律取 uosc 官方值（`controls=0`、`timeline_size=30`、`controls_spacing=2`、`menu_item_height=36`、`border_radius=2`）。
+   - **预览改版式前必须打开真实 mpv 对照**：`ui::mpv_preview` 的版式依据是 uosc 源码 + 实机截图（`docs/screenshots/uosc-real.png`），不是配置字面量。三条容易想错的：顶栏**没有通栏底色**（只有左上两行小字 + 右上窗口字形）、控制条常态**没有底色块**（`opacity.controls=0`，裸图标）、放不下时 uosc **从中间往外左右交替隐藏**（`fit_controls()`）。凭想象改必然再次被指出「这不是 uosc 的 UI」。
+   - **`ui::mpv_preview` 是硬编码颜色的唯一例外**：预览画的是**播放器的**皮肤配色，不是本应用的语义色，因此该文件允许直接用 `0xRRGGBB`（取自 `SkinPalette`）。其余任何视图仍禁止硬编码颜色。GPUI 无 `text_shadow` / 自定义 shader / 径向渐变，预览图标用 `div` 几何形状拼，别试图加载 Material Icons（组件库图标需注册 `AssetSource`，`gpui_kit::application()` 未挂载）。
+   - **恢复前先再备份**：`core::backup::restore()` 会先备份当前文件再覆盖，否则「撤回」本身不可撤回。备份页与配置页的撤回入口都必须走这条路径。
+   - **跨包同步先生成计划再执行**：`core::sync` 必须先产出含「新增 / 一致 / 冲突」三类的计划给用户过目，再执行写入。禁止一步直接写目标目录。
    - 不要把窗口控制按钮换回组件库的 `TitleBar`：其按钮依赖 SVG 资源，资源缺失时整块区域不可见。
 4. **README 风格**：顶部 shields.io 徽章（`<p align="center">` 纯 HTML 居中）→ 双名标题 → 语言切换徽章 + 文档导航 → `[!WARNING]` AI 声明 → 目录 → 正文 → 底部三节（关联仓库 / 作者联系方式 / 开源协议）。
 5. **双名标题**：README 顶部**中文名 `<h1>Névé 粒雪</h1>` 在上、GitHub 仓库名 `<h2>neve</h2>` 在下**，两者都要有。
@@ -87,6 +96,9 @@
 - **改 `core/config`**：必须补往返渲染测试（LF 与 CRLF 各一），确认注释、缩进、对齐空格与行序未被破坏；改逐行视图还要确认行尾说明与生效 / 被覆盖标记仍在。
 - **改写操作**：确认走 `BackupManager`，并补一条「写入 → 撤回 → 内容还原」的测试，配置编辑还要断言注释与行尾说明没被改掉。
 - **改配置页**：`cargo run` 实测，确认注释可见、行尾说明拆分、生效 / 被覆盖徽标、编辑条与撤回入口；截图存 `docs/screenshots/`。
+- **改皮肤页 / 预览画布**：先启动真实 mpv 观察当前 uosc 的实际形态（同一份 `portable_config`，`--ontop=yes` 便于截图），再对着 `docs/screenshots/uosc-real.png` 逐项复核顶栏、控制条、时间轴、菜单四处。改完截图存 `docs/screenshots/`。
+- **改滤镜页**：切换开关后必须校验目标文件的字节数与哈希变化（预期只差 `# ` 两个字节），再从备份还原并断言哈希回到原值。**不要拿用户的真实 `input.conf` 当试验田而不还原**。
+- **改备份 / 同步页**：确认恢复路径先备份再覆盖，同步执行前一定能看到计划。
 - **改徽章**：只改 `scripts/badges.config.json`，跑 `python scripts/update_badges.py`，再跑 `--check`。
 - **改文档**：正文与代码不一致时以代码为准，并同步 `CHANGELOG.md`。
 - **提交**：`git status` 确认不含 `target/`、临时文件与本地绝对路径截图。
@@ -100,6 +112,8 @@
 - 不要缩写命名、不要同名文件（含仅大小写不同）、不要用数字后缀解决冲突（`PlayerPanel2` ❌）。
 - 不要在 `src/core/` 里引入 GPUI 依赖，也不要在 `ui/` 里直接读配置文件字节——必须经 `core` 的解析器。
 - 不要绕过 `core::backup` 直接写用户目录。
+- 不要给 uosc 皮肤配置自造配色键，也不要凭配置想象预览版式——先开真实 mpv 看。
+- 不要在 `ui::mpv_preview` 以外的视图里硬编码颜色；该文件的例外仅限取自 `SkinPalette` 的播放器配色。
 - 不要在标题用 VS16 变体 emoji（`⚠️` / `🖼️`），会破坏自动锚点。
 - 不要删除 `AGENTS.md` / `CONTRIBUTING.md` / `CHANGELOG.md`；它们承载协作与 AI 约定。
 - 不要手改 `<!-- badges:start -->` / `<!-- language-nav:start -->` 之间的内容，也不要绕过脚本直接改徽章链接。

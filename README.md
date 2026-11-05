@@ -138,6 +138,40 @@
   </tr>
 </table>
 
+脚本页按播放器列出 `scripts/` 下的全部脚本与启停状态；滤镜页把 `input.conf` 里的滤镜开关、`shaders/` 下的 GLSL 与 `mpv.conf` 的配置组收成一张可切换清单，切换只做注释 / 取消注释，写完自动备份；备份与同步页是所有写操作的出口，跨包同步先生成计划再执行（见[架构文档](docs/架构文档.md) §5.13）：
+
+<table align="center">
+  <tr>
+    <td align="center" width="33%">
+      <img src="docs/screenshots/scripts-glass.png" alt="脚本页" width="100%">
+      <br><sub><b>脚本页 · 启停与 script-opts 标注</b></sub>
+    </td>
+    <td align="center" width="33%">
+      <img src="docs/screenshots/filters-glass.png" alt="滤镜页" width="100%">
+      <br><sub><b>滤镜页 · 分类 / 快捷键 / 行号 / 开关</b></sub>
+    </td>
+    <td align="center" width="33%">
+      <img src="docs/screenshots/backup-glass.png" alt="备份与同步页" width="100%">
+      <br><sub><b>备份与同步 · 记录、撤回与同步计划</b></sub>
+    </td>
+  </tr>
+</table>
+
+皮肤页把每套方案画成一张 16:9 的静态预览。uosc 那一支不是「画个像播放器的图」，而是照 `uosc` 源码逐条复刻：配色只用 `config_defaults.color` 里真实存在的 10 个键，`top_bar_size` / `timeline_size` / `controls_size` 一类默认值取官方值，顶栏按实机是**左上两行小字**（没有通栏底色），控制条按 `opacity.controls=0` 画成**裸图标**、放不下时从中间往外左右交替隐藏，时间戳在已播放段上**反色**（设计见[架构文档](docs/架构文档.md) §5.12）：
+
+<table align="center">
+  <tr>
+    <td align="center" width="50%">
+      <img src="docs/screenshots/skins-uosc.png" alt="皮肤页 uosc 预览" width="100%">
+      <br><sub><b>皮肤页 · uosc 预览（照源码与实机截图复刻）</b></sub>
+    </td>
+    <td align="center" width="50%">
+      <img src="docs/screenshots/uosc-real.png" alt="真实 mpv 的 uosc 界面" width="100%">
+      <br><sub><b>对照基准 · 真实 mpv 实拍</b></sub>
+    </td>
+  </tr>
+</table>
+
 > 截图为当前开发版本实拍，随界面迭代可能变化。
 
 ## 📦 快速开始

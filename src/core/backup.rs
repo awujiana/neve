@@ -25,6 +25,37 @@ pub struct BackupRecord {
     pub stamp: String,
 }
 
+impl BackupRecord {
+    /// 备份距今的秒数；时间戳异常时返回 None。
+    pub fn age_seconds(&self) -> Option<u64> {
+        let stamp = self.stamp.parse::<u128>().ok()?;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()?
+            .as_nanos();
+        now.checked_sub(stamp)
+            .map(|delta| (delta / 1_000_000_000) as u64)
+    }
+
+    /// 给人看的相对时间。备份页不展示纪元纳秒，避免把机器时间戳直接甩给用户。
+    pub fn age_label(&self) -> String {
+        let Some(seconds) = self.age_seconds() else {
+            return "时间未知".to_string();
+        };
+        match seconds {
+            0..60 => "刚刚".to_string(),
+            60..3600 => format!("{} 分钟前", seconds / 60),
+            3600..86_400 => format!("{} 小时前", seconds / 3600),
+            _ => format!("{} 天前", seconds / 86_400),
+        }
+    }
+
+    /// 备份副本的大小（字节），读取失败返回 None。
+    pub fn backup_size(&self) -> Option<u64> {
+        fs::metadata(&self.backup_path).ok().map(|meta| meta.len())
+    }
+}
+
 /// 备份管理器
 #[derive(Debug, Clone)]
 pub struct BackupManager {
@@ -113,8 +144,31 @@ impl BackupManager {
         records
     }
 
+    /// 列出全部操作分组名（按字典序），供「备份与同步」页浏览所有批次。
+    pub fn list_operations(&self) -> Vec<String> {
+        let Ok(entries) = fs::read_dir(&self.root) else {
+            return Vec::new();
+        };
+        let mut names: Vec<String> = entries
+            .flatten()
+            .filter(|entry| entry.path().is_dir())
+            .filter_map(|entry| entry.file_name().to_str().map(|name| name.to_string()))
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// 列出所有分组的备份记录，统一按时间新 → 旧排序。
+    pub fn list_all(&self) -> Vec<BackupRecord> {
+        let mut records = Vec::new();
+        for operation in self.list_operations() {
+            records.extend(self.list(&operation));
+        }
+        records.sort_by(|left, right| right.stamp.cmp(&left.stamp));
+        records
+    }
+
     /// 撤回指定备份：把备份副本写回原路径（父目录缺失时创建）
-    #[allow(dead_code)] // TODO(M2-UI): 撤回按钮接入后移除
     pub fn restore(&self, record: &BackupRecord) -> Result<(), String> {
         if !record.backup_path.is_file() {
             return Err(format!(
@@ -243,6 +297,31 @@ mod tests {
         let dir = temp_dir("empty");
         let manager = BackupManager::new(dir.join("backups"));
         assert!(manager.restore_latest("nothing").is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_all_collects_every_operation_newest_first() {
+        let dir = temp_dir("all");
+        let mpv = dir.join("mpv.conf");
+        let input = dir.join("input.conf");
+        assert!(fs::write(&mpv, "v1\n").is_ok());
+        assert!(fs::write(&input, "a\n").is_ok());
+        let manager = BackupManager::new(dir.join("backups"));
+        assert!(manager.backup_file("mpv.conf", &mpv).is_ok());
+        assert!(manager.backup_file("input.conf", &input).is_ok());
+        assert!(manager.backup_file("mpv.conf", &mpv).is_ok());
+
+        assert_eq!(
+            manager.list_operations(),
+            vec!["input.conf".to_string(), "mpv.conf".to_string()]
+        );
+        let all = manager.list_all();
+        assert_eq!(all.len(), 3);
+        assert!(all[0].stamp >= all[1].stamp);
+        assert!(all[1].stamp >= all[2].stamp);
+        assert_eq!(all[0].age_label(), "刚刚");
+        assert!(all[0].backup_size().is_some());
         let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -7,6 +7,7 @@
 //! 视图模型与交互动作在此聚合；core 层只提供纯逻辑与文件操作。
 
 pub mod glass;
+pub mod mpv_preview;
 mod theme;
 
 use std::path::{Path, PathBuf};
@@ -30,12 +31,15 @@ use gpui_kit::MouseButton;
 #[cfg(not(windows))]
 use gpui_kit::component::InteractiveElementExt as _;
 
-use crate::core::backup::BackupManager;
+use crate::core::backup::{BackupManager, BackupRecord};
 use crate::core::config::document::{
     self, ConfigFileFormat, ConfigFileView, ConfigLineKind, ConfigLineView, EffectiveState,
     PlayerConfigWorkspace,
 };
 use crate::core::config::report::PlayerConfigReport;
+use crate::core::filters::{
+    FilterCatalog, FilterEntry, FilterKind, scan_filters, toggle_line, toggle_profile,
+};
 use crate::core::players::{
     DetectedPlayer, detect_players, launch_player, open_directory, probe_version,
 };
@@ -45,7 +49,10 @@ use crate::core::scripts::uosc::{
 use crate::core::scripts::{
     DependencyIssue, ScriptEntry, disable_script, enable_script, list_scripts, scan_dependencies,
 };
-use crate::core::sync::{ConflictPolicy, SyncKind, apply_sync, plan_script_sync};
+use crate::core::skins::{SkinPreset, apply_skin, scan_skins};
+use crate::core::sync::{ConflictPolicy, SyncKind, SyncPlan, apply_sync, plan_script_sync};
+
+use mpv_preview::PreviewTone;
 
 pub use theme::set_appearance as apply_theme;
 
@@ -149,6 +156,40 @@ pub fn build_panels(players: &[DetectedPlayer]) -> Vec<PlayerPanel> {
     panels
 }
 
+/// 脚本 / 滤镜 / 皮肤 / 备份页共用的派生数据。
+///
+/// 全部由「只读扫描 + 只读列举」得到，`AppShell::new` 与每次写后 `refresh()` 都走这里，
+/// 避免四个页面各自读盘、状态互相打架。写操作一律经 core 层的 `BackupManager`。
+struct DerivedViews {
+    filter_catalogs: Vec<FilterCatalog>,
+    skin_presets: Vec<SkinPreset>,
+    backup_records: Vec<BackupRecord>,
+    backup_operations: Vec<String>,
+}
+
+impl DerivedViews {
+    fn load(players: &[DetectedPlayer]) -> Self {
+        let filter_catalogs = players
+            .iter()
+            .map(|player| match player.config_dir.as_deref() {
+                Some(dir) => scan_filters(dir),
+                None => FilterCatalog::unavailable(
+                    Path::new(""),
+                    "该播放器没有可用的配置目录，无法读取滤镜清单",
+                ),
+            })
+            .collect();
+
+        let backups = BackupManager::with_default_root();
+        Self {
+            filter_catalogs,
+            skin_presets: scan_skins(players),
+            backup_operations: backups.list_operations(),
+            backup_records: backups.list_all(),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 操作反馈
 // ---------------------------------------------------------------------------
@@ -228,6 +269,8 @@ enum Page {
     Overview,
     Players,
     Scripts,
+    /// 视频滤镜 / GLSL 着色器 / mpv.conf 配置组的注释式切换。
+    Filters,
     Skins,
     Configs,
     Backup,
@@ -237,10 +280,11 @@ enum Page {
 }
 
 impl Page {
-    const ALL: [Page; 8] = [
+    const ALL: [Page; 9] = [
         Page::Overview,
         Page::Players,
         Page::Scripts,
+        Page::Filters,
         Page::Skins,
         Page::Configs,
         Page::Backup,
@@ -253,6 +297,7 @@ impl Page {
             Page::Overview => "概览",
             Page::Players => "播放器",
             Page::Scripts => "脚本",
+            Page::Filters => "滤镜",
             Page::Skins => "皮肤",
             Page::Configs => "配置",
             Page::Backup => "备份与同步",
@@ -266,31 +311,17 @@ impl Page {
         match self {
             Page::Overview => "检测结果、待处理事项与最近一次操作的汇总。",
             Page::Players => "所有使用 MPV 内核的播放器，及其配置目录与可管理内容。",
-            Page::Scripts => "已安装脚本、依赖关系与跨包同步。",
-            Page::Skins => "uosc 主题与 OSC 皮肤的预览和应用。",
+            Page::Scripts => "已安装脚本、启停开关、依赖关系与 uosc 专项管理。",
+            Page::Filters => {
+                "视频滤镜、GLSL 着色器与配置组：切换只注释目标行，写前备份、写后自检。"
+            }
+            Page::Skins => "按 uosc.conf 真实绘制 mpv 播放器 UI；选择并应用皮肤方案。",
             Page::Configs => {
                 "按原文逐行查看 mpv.conf、input.conf 与脚本选项，注释与生效关系一目了然。"
             }
-            Page::Backup => "写入前的备份批次与恢复入口。",
+            Page::Backup => "写入前的备份批次、恢复入口与跨整合包同步计划。",
             Page::Settings => "外观、语言、音效、托盘、数据位置与系统集成。",
             Page::GlassLab => "实时调整液态玻璃参数，并对照五种预设的渲染结果。",
-        }
-    }
-
-    /// 尚未接入的页面给出版本归属，避免把「未实现」伪装成「空列表」。
-    fn milestone(self) -> Option<&'static str> {
-        match self {
-            Page::Overview | Page::Players => None,
-            Page::Scripts => Some(
-                "启停开关、依赖扫描与跨包同步已可用，见「播放器」页。独立的脚本库视图随 M3 接入。",
-            ),
-            Page::Skins => Some("uosc 主题与 OSC 皮肤管理对应 FR-10，随 M3 接入。"),
-            Page::Configs => None,
-            Page::Backup => {
-                Some("备份记录已落盘（backups/<操作>/<时间戳>/），浏览与批量恢复随 M4 接入。")
-            }
-            Page::Settings => Some("外观定制（FR-04）与系统集成（FR-06）随 M4 接入。"),
-            Page::GlassLab => None,
         }
     }
 }
@@ -658,6 +689,49 @@ pub struct AppShell {
     config_all_lines: bool,
     /// 配置页：正在编辑的项。
     config_edit: Option<ConfigEdit>,
+
+    // --- 脚本页 ---
+    /// 脚本页：当前查看的播放器下标（与 `panels` 对齐）。
+    script_player: usize,
+
+    // --- 滤镜页 ---
+    /// 滤镜页：每个播放器一份滤镜全景（与 `panels` 对齐）。
+    filter_catalogs: Vec<FilterCatalog>,
+    /// 滤镜页：当前播放器下标。
+    filter_player: usize,
+    /// 滤镜页：当前分类标签。
+    filter_tab: FilterKind,
+    /// 滤镜页：超长清单是否展开。
+    filter_all: bool,
+    /// 滤镜页：只看已启用的条目。
+    filter_enabled_only: bool,
+
+    // --- 皮肤页 ---
+    /// 皮肤页：按玩家与 uosc.conf 扫出的可用方案。
+    skin_presets: Vec<SkinPreset>,
+    /// 皮肤页：当前选中的方案下标。
+    skin_selected: usize,
+    /// 皮肤页：把皮肤写进哪个播放器的 mpv.conf。
+    skin_player: usize,
+    /// 皮肤预览当前套用的滤镜名（None = 原始画面）。
+    preview_filter: Option<String>,
+    /// 皮肤预览的画面色调（由滤镜名派生，也可手动挑）。
+    preview_tone: PreviewTone,
+
+    // --- 备份与同步页 ---
+    /// 备份与同步页：全部备份记录（新 → 旧）。
+    backup_records: Vec<BackupRecord>,
+    /// 备份与同步页：操作分组名。
+    backup_operations: Vec<String>,
+    /// 备份与同步页：是否展开全部记录。
+    backup_all: bool,
+    /// 跨包同步：源 / 目标播放器下标。
+    sync_src: usize,
+    sync_dst: usize,
+    /// 跨包同步：待同步的脚本名。
+    sync_script_name: Option<String>,
+    /// 跨包同步：只读计划预览，必须先生成才能执行。
+    sync_plan: Option<SyncPlan>,
 }
 
 impl AppShell {
@@ -701,6 +775,21 @@ impl AppShell {
             .iter()
             .position(|workspace| !workspace.files.is_empty())
             .unwrap_or(0);
+        let derived = DerivedViews::load(&players);
+        // 有配置目录的播放器优先作为滤镜 / 皮肤 / 同步的默认目标。
+        let first_with_config = players
+            .iter()
+            .position(|player| player.config_dir.is_some())
+            .unwrap_or(0);
+        let sync_dst = if players.len() > 1 {
+            (first_with_config + 1) % players.len()
+        } else {
+            first_with_config
+        };
+        let sync_script_name = panels
+            .get(first_with_config)
+            .and_then(|panel| panel.scripts.first())
+            .map(|script| script.name.clone());
         Self {
             players,
             panels,
@@ -722,6 +811,24 @@ impl AppShell {
             config_all_files: false,
             config_all_lines: false,
             config_edit: None,
+            script_player: first_with_config,
+            filter_catalogs: derived.filter_catalogs,
+            filter_player: first_with_config,
+            filter_tab: FilterKind::VideoFilter,
+            filter_all: false,
+            filter_enabled_only: false,
+            skin_presets: derived.skin_presets,
+            skin_selected: 0,
+            skin_player: first_with_config,
+            preview_filter: None,
+            preview_tone: PreviewTone::Normal,
+            backup_records: derived.backup_records,
+            backup_operations: derived.backup_operations,
+            backup_all: false,
+            sync_src: first_with_config,
+            sync_dst,
+            sync_script_name,
+            sync_plan: None,
         }
     }
 
@@ -730,7 +837,62 @@ impl AppShell {
         self.players = detect_players();
         self.panels = build_panels(&self.players);
         self.config_workspaces = document::build_workspaces(&self.players);
+        let derived = DerivedViews::load(&self.players);
+        self.filter_catalogs = derived.filter_catalogs;
+        self.skin_presets = derived.skin_presets;
+        self.backup_records = derived.backup_records;
+        self.backup_operations = derived.backup_operations;
         self.clamp_config_selection();
+        self.clamp_view_selection();
+        // 文件已经变了，旧计划必须作废，避免拿过期行号 / 差异去写盘。
+        self.sync_plan = None;
+    }
+
+    /// 播放器数量或方案数量变化后，把四个新页面的下标收回合法范围。
+    fn clamp_view_selection(&mut self) {
+        let players = self.panels.len();
+        if players == 0 {
+            self.script_player = 0;
+            self.filter_player = 0;
+            self.skin_player = 0;
+            self.sync_src = 0;
+            self.sync_dst = 0;
+        } else {
+            if self.script_player >= players {
+                self.script_player = 0;
+            }
+            if self.filter_player >= players {
+                self.filter_player = 0;
+            }
+            if self.skin_player >= players {
+                self.skin_player = 0;
+            }
+            if self.sync_src >= players {
+                self.sync_src = 0;
+            }
+            if self.sync_dst >= players {
+                self.sync_dst = 0;
+            }
+            if players > 1 && self.sync_dst == self.sync_src {
+                self.sync_dst = (self.sync_src + 1) % players;
+            }
+        }
+        if self.skin_selected >= self.skin_presets.len() {
+            self.skin_selected = 0;
+        }
+        // 同步脚本若已从源播放器消失，清掉选择，让用户重新挑。
+        let still_there = self.panels.get(self.sync_src).is_some_and(|panel| {
+            self.sync_script_name
+                .as_ref()
+                .is_some_and(|name| panel.scripts.iter().any(|script| &script.name == name))
+        });
+        if !still_there {
+            self.sync_script_name = self
+                .panels
+                .get(self.sync_src)
+                .and_then(|panel| panel.scripts.first())
+                .map(|script| script.name.clone());
+        }
     }
 
     /// 播放器/文件数量变化后把下标收回到合法范围，避免切换页面时索引越界。
@@ -979,6 +1141,353 @@ impl AppShell {
             ConflictPolicy::Overwrite => "冲突策略：覆盖",
             ConflictPolicy::KeepBoth => "冲突策略：保留双份",
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // 脚本页 / 滤镜页 / 皮肤页 / 备份与同步页的动作
+    // -----------------------------------------------------------------------
+
+    fn set_script_player(&mut self, idx: usize, cx: &mut Context<Self>) {
+        self.script_player = idx;
+        cx.notify();
+    }
+
+    fn set_filter_player(&mut self, idx: usize, cx: &mut Context<Self>) {
+        self.filter_player = idx;
+        self.filter_all = false;
+        cx.notify();
+    }
+
+    fn set_filter_tab(&mut self, tab: FilterKind, cx: &mut Context<Self>) {
+        self.filter_tab = tab;
+        self.filter_all = false;
+        cx.notify();
+    }
+
+    fn toggle_filter_enabled_only(&mut self, cx: &mut Context<Self>) {
+        self.filter_enabled_only = !self.filter_enabled_only;
+        self.filter_all = false;
+        cx.notify();
+    }
+
+    fn toggle_filter_all(&mut self, cx: &mut Context<Self>) {
+        self.filter_all = !self.filter_all;
+        cx.notify();
+    }
+
+    /// 切换一条滤镜菜单行：只注释 / 取消注释目标行，写前备份，写后往返自检。
+    fn toggle_filter_entry(&mut self, entry_idx: usize, cx: &mut Context<Self>) {
+        let Some(catalog) = self.filter_catalogs.get(self.filter_player) else {
+            return;
+        };
+        if let Some(error) = catalog.error.clone() {
+            self.status = Some(StatusMessage::warning(error));
+            cx.notify();
+            return;
+        }
+        let Some(entry) = catalog.entries.get(entry_idx).cloned() else {
+            return;
+        };
+        // 菜单行也可能来自 mpv.conf（配置组用），按来源精确定位文件。
+        let file = if entry.source.eq_ignore_ascii_case("input.conf") {
+            catalog.input_path.clone()
+        } else {
+            catalog.mpv_path.clone()
+        };
+        let name = entry.name.clone();
+        let enabling = !entry.enabled;
+        let backups = BackupManager::with_default_root();
+        let result = toggle_line(&file, entry.line_no, enabling, &backups);
+        self.status = Some(match result {
+            Ok(_) => StatusMessage::success(format!(
+                "{name} 已{}（已备份，可在「备份与同步」页撤回）",
+                if enabling { "启用" } else { "停用" }
+            )),
+            Err(e) => StatusMessage::error(e),
+        });
+        if self
+            .status
+            .as_ref()
+            .is_some_and(|s| s.kind == StatusKind::Success)
+        {
+            // 启用时把预览切到这条滤镜，让「切换滤镜」立刻看得见效果。
+            self.preview_tone = PreviewTone::for_filter(&name);
+            self.preview_filter = enabling.then_some(name);
+            self.refresh();
+        }
+        cx.notify();
+    }
+
+    /// 切换一个 `[Profile]` 配置组：改 `profile=XXX` 行，没有就追加。
+    fn toggle_filter_profile(&mut self, profile_idx: usize, cx: &mut Context<Self>) {
+        let Some(catalog) = self.filter_catalogs.get(self.filter_player) else {
+            return;
+        };
+        if let Some(error) = catalog.error.clone() {
+            self.status = Some(StatusMessage::warning(error));
+            cx.notify();
+            return;
+        }
+        let Some(profile) = catalog.profiles.get(profile_idx).cloned() else {
+            return;
+        };
+        let mpv_path = catalog.mpv_path.clone();
+        let name = profile.name.clone();
+        let enabling = !profile.enabled;
+        let backups = BackupManager::with_default_root();
+        let result = toggle_profile(&mpv_path, &name, enabling, &backups);
+        self.status = Some(match result {
+            Ok(_) => StatusMessage::success(format!(
+                "配置组 [{name}] 已{}（已备份）",
+                if enabling { "启用" } else { "停用" }
+            )),
+            Err(e) => StatusMessage::error(e),
+        });
+        if self
+            .status
+            .as_ref()
+            .is_some_and(|s| s.kind == StatusKind::Success)
+        {
+            self.refresh();
+        }
+        cx.notify();
+    }
+
+    /// 撤回某个配置文件最近一次写入（滤镜页的「撤回」按钮）。
+    fn undo_operation(&mut self, operation: String, cx: &mut Context<Self>) {
+        let backups = BackupManager::with_default_root();
+        self.status = Some(match backups.restore_latest(&operation) {
+            Ok(record) => StatusMessage::success(format!(
+                "已撤回 {operation} 最近一次写入（{}）",
+                record.original_path.display()
+            )),
+            Err(e) => StatusMessage::warning(e),
+        });
+        self.refresh();
+        cx.notify();
+    }
+
+    /// 把某条滤镜带进皮肤预览，并跳到皮肤页看画面色调变化。
+    fn preview_filter_entry(&mut self, entry_idx: usize, cx: &mut Context<Self>) {
+        let Some(name) = self
+            .filter_catalogs
+            .get(self.filter_player)
+            .and_then(|catalog| catalog.entries.get(entry_idx))
+            .map(|entry| entry.name.clone())
+        else {
+            return;
+        };
+        self.preview_tone = PreviewTone::for_filter(&name);
+        self.preview_filter = Some(name);
+        self.page = Page::Skins;
+        cx.notify();
+    }
+
+    fn set_preview_tone(&mut self, tone: PreviewTone, cx: &mut Context<Self>) {
+        self.preview_tone = tone;
+        self.preview_filter = None;
+        cx.notify();
+    }
+
+    fn select_skin(&mut self, idx: usize, cx: &mut Context<Self>) {
+        self.skin_selected = idx;
+        cx.notify();
+    }
+
+    fn set_skin_player(&mut self, idx: usize, cx: &mut Context<Self>) {
+        self.skin_player = idx;
+        cx.notify();
+    }
+
+    /// 应用皮肤：uosc 需要 `osc=no`，内置 OSC 则注释掉该行；绝不删用户文件。
+    fn apply_selected_skin(&mut self, cx: &mut Context<Self>) {
+        let Some(preset) = self.skin_presets.get(self.skin_selected).cloned() else {
+            return;
+        };
+        let Some(dir) = self.config_dir_of(self.skin_player) else {
+            self.status = Some(StatusMessage::warning("目标播放器没有可用的配置目录"));
+            cx.notify();
+            return;
+        };
+        let mpv_path = dir.join("mpv.conf");
+        if !mpv_path.is_file() {
+            self.status = Some(StatusMessage::warning(format!(
+                "找不到 {}，无法应用皮肤",
+                mpv_path.display()
+            )));
+            cx.notify();
+            return;
+        }
+        let backups = BackupManager::with_default_root();
+        self.status = Some(match apply_skin(&mpv_path, preset.kind, &backups) {
+            Ok(Some(_)) => {
+                StatusMessage::success(format!("已应用「{}」：{}", preset.name, preset.kind.hint()))
+            }
+            Ok(None) => StatusMessage::info(format!(
+                "「{}」所需的 osc 设置已是目标状态，无需写盘",
+                preset.name
+            )),
+            Err(e) => StatusMessage::error(e),
+        });
+        self.refresh();
+        cx.notify();
+    }
+
+    fn toggle_backup_all(&mut self, cx: &mut Context<Self>) {
+        self.backup_all = !self.backup_all;
+        cx.notify();
+    }
+
+    /// 恢复一条备份。恢复本身也是写入，所以先把当前状态另存一份，保证恢复可撤回。
+    fn restore_backup(&mut self, idx: usize, cx: &mut Context<Self>) {
+        let Some(record) = self.backup_records.get(idx).cloned() else {
+            return;
+        };
+        let backups = BackupManager::with_default_root();
+        let undo = if record.original_path.is_file() {
+            backups
+                .backup_file(
+                    &format!("restore-{}", record.operation),
+                    &record.original_path,
+                )
+                .ok()
+        } else {
+            None
+        };
+        let extra = if undo.is_some() {
+            "（恢复前的状态已另存备份，可再次撤回）"
+        } else {
+            "（原文件此前不存在，本次恢复无法再撤回）"
+        };
+        self.status = Some(match backups.restore(&record) {
+            Ok(()) => {
+                StatusMessage::success(format!("已恢复 {}{extra}", record.original_path.display()))
+            }
+            Err(e) => StatusMessage::error(e),
+        });
+        self.refresh();
+        cx.notify();
+    }
+
+    fn refresh_backups(&mut self, cx: &mut Context<Self>) {
+        let backups = BackupManager::with_default_root();
+        self.backup_operations = backups.list_operations();
+        self.backup_records = backups.list_all();
+        self.status = Some(StatusMessage::info(format!(
+            "已刷新，共 {} 条备份记录",
+            self.backup_records.len()
+        )));
+        cx.notify();
+    }
+
+    /// 脚本页「同步到其它播放器」：带入源播放器与脚本，跳到备份与同步页。
+    fn open_sync_for_script(
+        &mut self,
+        player_idx: usize,
+        script_name: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.sync_src = player_idx;
+        self.sync_script_name = Some(script_name);
+        if self.panels.len() > 1 && self.sync_dst == self.sync_src {
+            self.sync_dst = (self.sync_src + 1) % self.panels.len();
+        }
+        self.sync_plan = None;
+        self.page = Page::Backup;
+        self.status = Some(StatusMessage::info("已带入脚本，先生成同步计划再执行"));
+        cx.notify();
+    }
+
+    fn set_sync_src(&mut self, idx: usize, cx: &mut Context<Self>) {
+        self.sync_src = idx;
+        self.sync_script_name = self
+            .panels
+            .get(idx)
+            .and_then(|panel| panel.scripts.first())
+            .map(|script| script.name.clone());
+        self.sync_plan = None;
+        cx.notify();
+    }
+
+    fn set_sync_dst(&mut self, idx: usize, cx: &mut Context<Self>) {
+        self.sync_dst = idx;
+        self.sync_plan = None;
+        cx.notify();
+    }
+
+    fn set_sync_script(&mut self, name: String, cx: &mut Context<Self>) {
+        self.sync_script_name = Some(name);
+        self.sync_plan = None;
+        cx.notify();
+    }
+
+    /// 只读生成同步计划；执行前必须先看差异，避免盲写。
+    fn build_sync_plan(&mut self, cx: &mut Context<Self>) {
+        let Some(name) = self.sync_script_name.clone() else {
+            self.status = Some(StatusMessage::warning("先选择要同步的脚本"));
+            cx.notify();
+            return;
+        };
+        if self.sync_src == self.sync_dst {
+            self.status = Some(StatusMessage::warning("源播放器与目标播放器不能相同"));
+            cx.notify();
+            return;
+        }
+        let (Some(src_dir), Some(dst_dir)) = (
+            self.config_dir_of(self.sync_src),
+            self.config_dir_of(self.sync_dst),
+        ) else {
+            self.status = Some(StatusMessage::warning("源或目标播放器没有可用的配置目录"));
+            cx.notify();
+            return;
+        };
+        let src_name = self.player_name(self.sync_src);
+        let dst_name = self.player_name(self.sync_dst);
+        match plan_script_sync(&src_dir, &dst_dir, &name) {
+            Ok(plan) => {
+                self.status = Some(StatusMessage::info(format!(
+                    "计划已生成：{src_name} → {dst_name}，新增 {} / 一致 {} / 冲突 {}",
+                    plan.count(SyncKind::New),
+                    plan.count(SyncKind::Identical),
+                    plan.count(SyncKind::Conflict)
+                )));
+                self.sync_plan = Some(plan);
+            }
+            Err(error) => {
+                self.status = Some(StatusMessage::error(format!("无法生成同步计划：{error}")));
+                self.sync_plan = None;
+            }
+        }
+        cx.notify();
+    }
+
+    /// 执行已经确认过的同步计划；覆盖前由 core 层强制备份。
+    fn execute_sync_plan(&mut self, cx: &mut Context<Self>) {
+        let Some(plan) = self.sync_plan.clone() else {
+            self.status = Some(StatusMessage::warning("请先生成同步计划"));
+            cx.notify();
+            return;
+        };
+        let backups = BackupManager::with_default_root();
+        self.status = Some(match apply_sync(&plan, self.policy, &backups) {
+            Ok(report) => {
+                let text = format!(
+                    "同步完成：写入 {}，跳过 {}，双份 {}，覆盖前备份 {}",
+                    report.written,
+                    report.skipped,
+                    report.kept_both,
+                    report.backups.len()
+                );
+                if report.skipped > 0 {
+                    StatusMessage::warning(text)
+                } else {
+                    StatusMessage::success(text)
+                }
+            }
+            Err(error) => StatusMessage::error(format!("同步失败：{error}")),
+        });
+        self.refresh();
+        cx.notify();
     }
 
     // -----------------------------------------------------------------------
@@ -1536,7 +2045,16 @@ impl AppShell {
 
         // 工具行：只在有写入动作的页面出现；冲突策略与同步绑定，配置页不需要它，
         // 但编辑/撤回的结果提示必须能看到。
-        if matches!(self.page, Page::Overview | Page::Players | Page::Configs) {
+        if matches!(
+            self.page,
+            Page::Overview
+                | Page::Players
+                | Page::Scripts
+                | Page::Filters
+                | Page::Skins
+                | Page::Configs
+                | Page::Backup
+        ) {
             let mut tools = h_flex().items_center().gap_2().pt_2();
             if matches!(self.page, Page::Overview | Page::Players) {
                 tools = tools.child(
@@ -3303,18 +3821,1160 @@ impl AppShell {
             .into_any_element()
     }
 
-    fn render_pending(&self, cx: &mut Context<Self>) -> AnyElement {
-        let page = self.page;
-        let hint = page.milestone().unwrap_or("该模块尚未接入。");
-        let action = Button::new("back-overview")
-            .label("返回概览")
-            .with_size(Size::Small)
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.page = Page::Overview;
-                cx.notify();
-            }))
+    // -----------------------------------------------------------------------
+    // 脚本页
+    // -----------------------------------------------------------------------
+
+    fn render_scripts(&self, cx: &mut Context<Self>) -> AnyElement {
+        let t = cx.theme();
+        let fg = t.colors.foreground;
+        let muted = t.colors.muted_foreground;
+        let secondary = t.colors.secondary;
+
+        if self.panels.is_empty() {
+            let action = Button::new("scripts-rescan-empty")
+                .label("重新扫描")
+                .primary()
+                .with_size(Size::Small)
+                .on_click(cx.listener(|this, _, _, cx| this.rescan(cx)))
+                .into_any_element();
+            return empty_state(
+                "未检测到 MPV 内核播放器",
+                "脚本页按播放器分组展示 scripts/ 下的脚本、启停状态与依赖。安装播放器后重新扫描。",
+                Some(action),
+                cx,
+            )
             .into_any_element();
-        empty_state(page.label(), hint, Some(action), cx).into_any_element()
+        }
+
+        let mut body = v_flex().gap_4();
+
+        // --- 播放器选择 ---
+        let mut picker = h_flex().flex_wrap().items_center().gap_2();
+        for (idx, panel) in self.panels.iter().enumerate() {
+            let label = format!("{}（{} 脚本）", panel.name, panel.scripts.len());
+            picker = picker.child(
+                chip(
+                    SharedString::from(format!("script-player-{idx}")),
+                    label,
+                    idx == self.script_player,
+                    cx,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| this.set_script_player(idx, cx))),
+            );
+        }
+        body = body.child(
+            card(cx)
+                .gap_2()
+                .child(section_title("选择播放器", cx))
+                .child(picker),
+        );
+
+        let Some(panel) = self.panels.get(self.script_player) else {
+            return body.into_any_element();
+        };
+        let player_idx = self.script_player;
+        let enabled = panel.scripts.iter().filter(|script| script.enabled).count();
+        let disabled = panel.scripts.len().saturating_sub(enabled);
+        let with_conf = panel
+            .scripts
+            .iter()
+            .filter(|script| script.has_script_opt)
+            .count();
+        let installed = panel.uosc.installed;
+        let conf_exists = panel.uosc.conf_exists;
+        let commit = panel
+            .uosc
+            .commit
+            .clone()
+            .unwrap_or_else(|| "未知".to_string());
+        let dir_label = panel.config_dir_label.clone();
+
+        body = body.child(
+            h_flex()
+                .gap_3()
+                .child(stat_card(
+                    panel.scripts.len().to_string(),
+                    "已安装脚本",
+                    "含目录型与单文件脚本".to_string(),
+                    cx,
+                ))
+                .child(stat_card(
+                    enabled.to_string(),
+                    "已启用",
+                    ".lua 才会被 mpv 加载".to_string(),
+                    cx,
+                ))
+                .child(stat_card(
+                    disabled.to_string(),
+                    "已停用",
+                    "重命名为 .lua.disabled".to_string(),
+                    cx,
+                ))
+                .child(stat_card(
+                    panel.deps.len().to_string(),
+                    "依赖问题",
+                    "已知依赖表扫描结果".to_string(),
+                    cx,
+                )),
+        );
+
+        // --- 脚本清单 ---
+        let mut list = card(cx).gap_2();
+        list = list.child(section_title(
+            format!("脚本清单 · {} 个带 script-opts · {}", with_conf, dir_label),
+            cx,
+        ));
+        if panel.scripts.is_empty() {
+            list = list.child(
+                div()
+                    .text_xs()
+                    .text_color(muted)
+                    .child("该配置目录下没有 scripts/，或没有可用的 .lua / main.lua 入口。"),
+            );
+        } else {
+            for (script_idx, script) in panel.scripts.iter().enumerate() {
+                let name = script.name.clone();
+                let path_label = script.path.display().to_string();
+                let sync_name = name.clone();
+                let mut row = h_flex()
+                    .items_center()
+                    .gap_2()
+                    .py_1()
+                    .child(
+                        div()
+                            .w(px(148.))
+                            .flex_none()
+                            .text_xs()
+                            .text_color(if script.enabled { fg } else { muted })
+                            .child(name),
+                    )
+                    .child(
+                        div()
+                            .w(px(62.))
+                            .flex_none()
+                            .when(script.has_script_opt, |cell| {
+                                cell.child(badge("有 conf", muted, secondary))
+                            }),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(path_label),
+                    )
+                    .child(
+                        Switch::new(SharedString::from(format!(
+                            "script-sw-{player_idx}-{script_idx}"
+                        )))
+                        .checked(script.enabled)
+                        .with_size(Size::Small)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.toggle_script(player_idx, script_idx, cx)
+                        })),
+                    );
+                row = row.child(
+                    Button::new(SharedString::from(format!(
+                        "script-sync-{player_idx}-{script_idx}"
+                    )))
+                    .label("同步到…")
+                    .with_size(Size::XSmall)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.open_sync_for_script(player_idx, sync_name.clone(), cx)
+                    })),
+                );
+                list = list.child(row);
+            }
+            list =
+                list.child(div().text_xs().text_color(muted).child(
+                    "开关直接重命名入口文件；「同步到…」会带入「备份与同步」页生成差异计划。",
+                ));
+        }
+        body = body.child(list);
+
+        // --- 依赖问题 ---
+        if !panel.deps.is_empty() {
+            let mut deps = card(cx).gap_2();
+            deps = deps.child(section_title("依赖关系", cx));
+            for issue in &panel.deps {
+                deps = deps.child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(div().text_xs().text_color(t.colors.warning).child("!"))
+                        .child(div().text_xs().text_color(t.colors.warning).child(format!(
+                            "{} 缺少 {}",
+                            issue.script,
+                            issue.missing.join("、")
+                        ))),
+                );
+            }
+            body = body.child(deps);
+        }
+
+        // --- uosc 专项 ---
+        let mut uosc = card(cx).gap_2();
+        uosc = uosc.child(section_title("uosc 专项管理", cx));
+        uosc = uosc.child(div().text_xs().text_color(muted).child(format!(
+            "状态：{} · uosc.conf {} · commit {}",
+            if installed { "已安装" } else { "未安装" },
+            if conf_exists { "存在" } else { "缺失" },
+            commit
+        )));
+        uosc = uosc.child(
+            h_flex()
+                .flex_wrap()
+                .gap_2()
+                .child(
+                    Button::new("scripts-uosc-install")
+                        .label(if installed {
+                            "更新 uosc"
+                        } else {
+                            "安装 uosc"
+                        })
+                        .with_size(Size::XSmall)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if installed {
+                                this.update(player_idx, cx)
+                            } else {
+                                this.install(player_idx, cx)
+                            }
+                        })),
+                )
+                .child(
+                    Button::new("scripts-uosc-undo")
+                        .label("撤回 uosc.conf")
+                        .with_size(Size::XSmall)
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| this.undo_uosc_conf(player_idx, cx)),
+                        ),
+                )
+                .child(
+                    Button::new("scripts-uosc-skin")
+                        .label("查看皮肤预览")
+                        .with_size(Size::XSmall)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.page = Page::Skins;
+                            cx.notify();
+                        })),
+                ),
+        );
+        body = body.child(uosc);
+        body.into_any_element()
+    }
+
+    // -----------------------------------------------------------------------
+    // 滤镜页
+    // -----------------------------------------------------------------------
+
+    fn render_filters(&self, cx: &mut Context<Self>) -> AnyElement {
+        let t = cx.theme();
+        let fg = t.colors.foreground;
+        let muted = t.colors.muted_foreground;
+        let secondary = t.colors.secondary;
+        let primary = t.colors.primary;
+        let success = t.colors.success;
+        let warning = t.colors.warning;
+
+        if self.filter_catalogs.is_empty() {
+            let action = Button::new("filters-rescan-empty")
+                .label("重新扫描")
+                .primary()
+                .with_size(Size::Small)
+                .on_click(cx.listener(|this, _, _, cx| this.rescan(cx)))
+                .into_any_element();
+            return empty_state(
+                "未检测到 MPV 内核播放器",
+                "滤镜页读取 input.conf 的 #menu: 标注与 mpv.conf 的 [Profile] 配置组。安装播放器后重新扫描。",
+                Some(action),
+                cx,
+            )
+            .into_any_element();
+        }
+
+        let mut body = v_flex().gap_4();
+
+        // --- 播放器选择 ---
+        let mut picker = h_flex().flex_wrap().items_center().gap_2();
+        for (idx, panel) in self.panels.iter().enumerate() {
+            let entries = self
+                .filter_catalogs
+                .get(idx)
+                .map(|c| c.entries.len() + c.profiles.len())
+                .unwrap_or(0);
+            picker = picker.child(
+                chip(
+                    SharedString::from(format!("filter-player-{idx}")),
+                    format!("{}（{} 项）", panel.name, entries),
+                    idx == self.filter_player,
+                    cx,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| this.set_filter_player(idx, cx))),
+            );
+        }
+        body = body.child(
+            card(cx)
+                .gap_2()
+                .child(section_title("选择播放器", cx))
+                .child(picker),
+        );
+
+        let Some(catalog) = self.filter_catalogs.get(self.filter_player) else {
+            return body.into_any_element();
+        };
+
+        body = body.child(
+            h_flex()
+                .gap_3()
+                .child(stat_card(
+                    catalog.count(FilterKind::VideoFilter).to_string(),
+                    "视频滤镜",
+                    "vf toggle 菜单行".to_string(),
+                    cx,
+                ))
+                .child(stat_card(
+                    catalog.count(FilterKind::Shader).to_string(),
+                    "着色器",
+                    "glsl-shaders 菜单行".to_string(),
+                    cx,
+                ))
+                .child(stat_card(
+                    catalog.count(FilterKind::Profile).to_string(),
+                    "配置组",
+                    "mpv.conf [Profile]".to_string(),
+                    cx,
+                ))
+                .child(stat_card(
+                    catalog.enabled_count().to_string(),
+                    "当前启用",
+                    format!("shaders/ 下 {} 个 GLSL", catalog.shader_files.len()),
+                    cx,
+                )),
+        );
+
+        if let Some(error) = &catalog.error {
+            body = body.child(
+                card(cx).child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(div().text_xs().text_color(warning).child("!"))
+                        .child(div().text_xs().text_color(warning).child(error.clone())),
+                ),
+            );
+        }
+
+        // --- 分类 / 过滤 ---
+        let mut tabs = h_flex().flex_wrap().items_center().gap_2();
+        for kind in FilterKind::ALL {
+            tabs = tabs.child(
+                chip(
+                    SharedString::from(format!("filter-tab-{}", kind.label())),
+                    format!("{} · {}", kind.label(), catalog.count(kind)),
+                    kind == self.filter_tab,
+                    cx,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| this.set_filter_tab(kind, cx))),
+            );
+        }
+        tabs = tabs.child(
+            chip(
+                SharedString::from("filter-enabled-only"),
+                if self.filter_enabled_only {
+                    "✓ 只看已启用"
+                } else {
+                    "只看已启用"
+                },
+                self.filter_enabled_only,
+                cx,
+            )
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_filter_enabled_only(cx))),
+        );
+        body = body.child(
+            card(cx)
+                .gap_2()
+                .child(section_title("切换滤镜 / 着色器 / 配置组", cx))
+                .child(tabs),
+        );
+
+        // --- 条目清单 ---
+        let mut list = card(cx).gap_2();
+        list = list.child(section_title(
+            format!(
+                "{} · {} · 切换即注释目标行 · {}",
+                self.filter_tab.label(),
+                if catalog.editable() {
+                    "可切换"
+                } else {
+                    "只读"
+                },
+                catalog.input_path.display()
+            ),
+            cx,
+        ));
+
+        if self.filter_tab == FilterKind::Profile {
+            if catalog.profiles.is_empty() {
+                list = list.child(
+                    div()
+                        .text_xs()
+                        .text_color(muted)
+                        .child("mpv.conf 里没有 [Profile] 配置组。"),
+                );
+            }
+            for (profile_idx, profile) in catalog.profiles.iter().enumerate() {
+                let name = profile.name.clone();
+                list =
+                    list.child(
+                        h_flex()
+                            .items_center()
+                            .gap_2()
+                            .py_1()
+                            .child(
+                                div()
+                                    .w(px(150.))
+                                    .flex_none()
+                                    .text_xs()
+                                    .text_color(fg)
+                                    .child(format!("[{name}]")),
+                            )
+                            .child(
+                                div()
+                                    .w(px(150.))
+                                    .flex_none()
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .child(profile.description.clone()),
+                            )
+                            .child(div().flex_1().min_w_0().text_xs().text_color(muted).child(
+                                format!(
+                                    "{} 项配置 · {} 个着色器 · 第 {} 行",
+                                    profile.option_count,
+                                    profile.shaders.len(),
+                                    profile.header_line + 1
+                                ),
+                            ))
+                            .child(
+                                Switch::new(SharedString::from(format!(
+                                    "filter-profile-{profile_idx}"
+                                )))
+                                .checked(profile.enabled)
+                                .with_size(Size::Small)
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        this.toggle_filter_profile(profile_idx, cx)
+                                    },
+                                )),
+                            ),
+                    );
+            }
+        } else {
+            let mut shown: Vec<(usize, &FilterEntry)> = catalog
+                .entries
+                .iter()
+                .enumerate()
+                .filter(|(_, entry)| entry.kind == self.filter_tab)
+                .filter(|(_, entry)| !self.filter_enabled_only || entry.enabled)
+                .collect();
+            let total = shown.len();
+            let limit = if self.filter_all {
+                total
+            } else {
+                total.min(14)
+            };
+            shown.truncate(limit);
+            if total == 0 {
+                list = list.child(
+                    div()
+                        .text_xs()
+                        .text_color(muted)
+                        .child("这个分类下没有条目。切换播放器或关掉「只看已启用」。"),
+                );
+            }
+            for (entry_idx, entry) in shown {
+                let name = entry.name.clone();
+                let target = entry.target_label();
+                let mut row = h_flex()
+                    .items_center()
+                    .gap_2()
+                    .py_1()
+                    .child(
+                        div()
+                            .w(px(172.))
+                            .flex_none()
+                            .text_xs()
+                            .text_color(if entry.enabled { fg } else { muted })
+                            .child(name),
+                    )
+                    .child(badge(entry.category.clone(), muted, secondary))
+                    .when_some(entry.shortcut.clone(), |this, key| {
+                        this.child(badge(key, primary, secondary))
+                    })
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(format!(
+                                "第 {} 行 · {}",
+                                entry.line_no + 1,
+                                target.unwrap_or_else(|| entry.command.clone())
+                            )),
+                    )
+                    .child(
+                        Switch::new(SharedString::from(format!("filter-entry-{entry_idx}")))
+                            .checked(entry.enabled)
+                            .with_size(Size::Small)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.toggle_filter_entry(entry_idx, cx)
+                            })),
+                    );
+                row = row.child(
+                    Button::new(SharedString::from(format!("filter-preview-{entry_idx}")))
+                        .label("预览")
+                        .with_size(Size::XSmall)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.preview_filter_entry(entry_idx, cx)
+                        })),
+                );
+                list = list.child(row);
+            }
+            if total > limit {
+                list = list.child(
+                    Button::new("filter-expand")
+                        .label(format!("展开全部 {total}"))
+                        .with_size(Size::XSmall)
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_filter_all(cx))),
+                );
+            } else if self.filter_all && total > 14 {
+                list = list.child(
+                    Button::new("filter-collapse")
+                        .label("收起")
+                        .with_size(Size::XSmall)
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_filter_all(cx))),
+                );
+            }
+        }
+        body = body.child(list);
+
+        // --- 生效着色器 + 撤回 ---
+        let mut tools = card(cx).gap_2();
+        tools = tools.child(section_title("当前生效的 glsl-shaders", cx));
+        if catalog.active_shaders.is_empty() {
+            tools = tools.child(
+                div()
+                    .text_xs()
+                    .text_color(muted)
+                    .child("mpv.conf 里没有生效的 glsl-shaders 行。"),
+            );
+        } else {
+            for shader in catalog.active_shaders.iter().take(8) {
+                tools = tools.child(
+                    h_flex()
+                        .gap_2()
+                        .child(div().text_xs().text_color(success).child("•"))
+                        .child(div().text_xs().text_color(fg).child(shader.clone())),
+                );
+            }
+        }
+        let input_op = "input.conf".to_string();
+        let mpv_op = "mpv.conf".to_string();
+        tools = tools.child(
+            h_flex()
+                .flex_wrap()
+                .gap_2()
+                .pt_2()
+                .child(
+                    Button::new("filter-undo-input")
+                        .label("撤回 input.conf 最近一次")
+                        .with_size(Size::XSmall)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.undo_operation(input_op.clone(), cx)
+                        })),
+                )
+                .child(
+                    Button::new("filter-undo-mpv")
+                        .label("撤回 mpv.conf 最近一次")
+                        .with_size(Size::XSmall)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.undo_operation(mpv_op.clone(), cx)
+                        })),
+                )
+                .child(
+                    Button::new("filter-rescan")
+                        .label("重新扫描")
+                        .with_size(Size::XSmall)
+                        .on_click(cx.listener(|this, _, _, cx| this.rescan(cx))),
+                ),
+        );
+        body = body.child(tools);
+
+        body = body.child(
+            card(cx).gap_1().child(
+                div()
+                    .text_xs()
+                    .text_color(muted)
+                    .child("切换沿用整合包作者的习惯：只注释 / 取消注释目标行，不改写命令、不重排配置、不删文件。写前必经备份，写后用 conf 解析器做字节级往返自检；混合行尾或非 UTF-8 一律禁用切换。"),
+            ),
+        );
+        body.into_any_element()
+    }
+
+    // -----------------------------------------------------------------------
+    // 皮肤页：按 uosc.conf 真实绘制 mpv 播放器 UI
+    // -----------------------------------------------------------------------
+
+    fn render_skins(&self, cx: &mut Context<Self>) -> AnyElement {
+        let t = cx.theme();
+        let fg = t.colors.foreground;
+        let muted = t.colors.muted_foreground;
+        let secondary = t.colors.secondary;
+        let primary = t.colors.primary;
+
+        if self.skin_presets.is_empty() {
+            let action = Button::new("skins-rescan-empty")
+                .label("重新扫描")
+                .primary()
+                .with_size(Size::Small)
+                .on_click(cx.listener(|this, _, _, cx| this.rescan(cx)))
+                .into_any_element();
+            return empty_state(
+                "没有可用的皮肤方案",
+                "皮肤页读取各整合包的 script-opts/uosc.conf 绘制预览。安装播放器后重新扫描。",
+                Some(action),
+                cx,
+            )
+            .into_any_element();
+        }
+
+        let preset = self.skin_presets[self.skin_selected].clone();
+        let layout = preset.layout.clone();
+        let tone = self.preview_tone;
+        let filter_label = self.preview_filter.clone();
+        let mut body = v_flex().gap_4();
+
+        // --- 预览画布 ---
+        let mut preview = card(cx).gap_2();
+        preview = preview.child(section_title(
+            "mpv 播放器界面预览 · 颜色与控件来自第三方皮肤配置",
+            cx,
+        ));
+        preview = preview.child(mpv_preview::render_mpv_preview(
+            &preset,
+            tone,
+            filter_label.as_deref(),
+            cx,
+        ));
+
+        let mut tones = h_flex().flex_wrap().items_center().gap_2();
+        for candidate in [
+            PreviewTone::Normal,
+            PreviewTone::Warm,
+            PreviewTone::Cool,
+            PreviewTone::Bright,
+            PreviewTone::Soft,
+            PreviewTone::Mirror,
+        ] {
+            tones = tones.child(
+                chip(
+                    SharedString::from(format!("skin-tone-{}", candidate.label())),
+                    candidate.label(),
+                    tone == candidate && filter_label.is_none(),
+                    cx,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| this.set_preview_tone(candidate, cx))),
+            );
+        }
+        preview = preview.child(tones);
+        if let Some(name) = filter_label.clone() {
+            preview = preview.child(
+                h_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(badge(format!("当前预览滤镜：{name}"), primary, secondary))
+                    .child(
+                        Button::new("skin-clear-filter")
+                            .label("清除")
+                            .with_size(Size::XSmall)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.set_preview_tone(PreviewTone::Normal, cx)
+                            })),
+                    ),
+            );
+        }
+        body = body.child(preview);
+
+        // --- 预览里画了什么 ---
+        let controls: Vec<String> = layout
+            .controls
+            .iter()
+            .take(10)
+            .map(|item| item.label())
+            .collect();
+        let mut explanation = card(cx).gap_1();
+        explanation = explanation.child(section_title("预览里画了什么", cx));
+        for line in [
+            format!(
+                "UI 提供者：{} · {}",
+                preset.kind.label(),
+                preset.kind.hint()
+            ),
+            format!(
+                "顶栏：{} · {}px · 左上角两行小字（标题{} · 窗口按钮{}）",
+                layout.top_bar,
+                layout.top_bar_size,
+                if layout.top_bar_title { "开" } else { "关" },
+                if layout.top_bar_controls {
+                    "开"
+                } else {
+                    "关"
+                }
+            ),
+            format!(
+                "时间轴：{} · {}px（按展开态画）· 底槽不透明度 {} · 已播放段用前景色、时间戳反色",
+                layout.timeline_style, layout.timeline_size, layout.opacity.timeline
+            ),
+            format!(
+                "控制条：{}px 见方裸图标 · 间距 {} · 外边距 {} · 底色不透明度 {}",
+                layout.controls_size,
+                layout.controls_spacing,
+                layout.controls_margin,
+                layout.opacity.controls
+            ),
+            format!("控制条元素：{}", controls.join(" / ")),
+            format!(
+                "菜单：居中 · {}px/项 · 最窄 {}px · 圆角 {}px · 缩放 {}×",
+                layout.menu_item_height, layout.menu_min_width, layout.border_radius, layout.scale
+            ),
+            format!("配色：{}", layout.palette.summary()),
+        ] {
+            explanation =
+                explanation.child(div().text_xs().text_color(fg).child(format!("• {line}")));
+        }
+        explanation = explanation.child(
+            div()
+                .text_xs()
+                .text_color(muted)
+                .child("近似说明：图标用字体字形代替 uosc 内嵌的 Material Icons；GPUI 没有文字描边与 shader，滤镜对画面的影响用色调近似，不假装真的跑了 GLSL。"),
+        );
+        body = body.child(explanation);
+
+        // --- 方案列表 ---
+        let mut presets = card(cx).gap_2();
+        presets = presets.child(section_title(
+            format!("皮肤方案 · {} 套共存", self.skin_presets.len()),
+            cx,
+        ));
+        for (idx, item) in self.skin_presets.iter().enumerate() {
+            let selected = idx == self.skin_selected;
+            presets = presets.child(
+                h_flex()
+                    .id(ElementId::Name(SharedString::from(format!(
+                        "skin-row-{idx}-{}",
+                        item.key()
+                    ))))
+                    .items_center()
+                    .gap_3()
+                    .py_1()
+                    .px_2()
+                    .rounded(px(8.))
+                    .when(selected, move |this| this.bg(secondary))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| this.select_skin(idx, cx)))
+                    .child(mpv_preview::render_palette_swatch(item.layout.palette))
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_1()
+                            .child(div().text_xs().text_color(fg).child(item.name.clone()))
+                            .child(div().text_xs().text_color(muted).child(item.note.clone())),
+                    )
+                    .child(badge(item.kind.label(), primary, secondary)),
+            );
+        }
+        body = body.child(presets);
+
+        // --- 应用 ---
+        let mut apply = card(cx).gap_2();
+        apply = apply.child(section_title("应用皮肤（写入目标播放器的 mpv.conf）", cx));
+        let mut target_picker = h_flex().flex_wrap().items_center().gap_2();
+        for (idx, panel) in self.panels.iter().enumerate() {
+            target_picker = target_picker.child(
+                chip(
+                    SharedString::from(format!("skin-target-{idx}")),
+                    panel.name.clone(),
+                    idx == self.skin_player,
+                    cx,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| this.set_skin_player(idx, cx))),
+            );
+        }
+        apply = apply.child(target_picker);
+        apply = apply.child(
+            div()
+                .text_xs()
+                .text_color(muted)
+                .child("遵循 FR-10「单一 OSC 提供者」：uosc 需要 osc=no；内置 OSC 则把该行注释掉。绝不删除用户文件，写入前自动备份。"),
+        );
+        apply = apply.child(
+            Button::new("skin-apply")
+                .label(format!(
+                    "应用「{}」到 {}",
+                    preset.name,
+                    self.player_name(self.skin_player)
+                ))
+                .primary()
+                .with_size(Size::Small)
+                .on_click(cx.listener(|this, _, _, cx| this.apply_selected_skin(cx))),
+        );
+        body = body.child(apply);
+        body.into_any_element()
+    }
+
+    // -----------------------------------------------------------------------
+    // 备份与同步页
+    // -----------------------------------------------------------------------
+
+    fn render_backup(&self, cx: &mut Context<Self>) -> AnyElement {
+        let t = cx.theme();
+        let fg = t.colors.foreground;
+        let muted = t.colors.muted_foreground;
+        let secondary = t.colors.secondary;
+        let primary = t.colors.primary;
+        let success = t.colors.success;
+        let warning = t.colors.warning;
+
+        let total_bytes: u64 = self
+            .backup_records
+            .iter()
+            .filter_map(BackupRecord::backup_size)
+            .sum();
+        let mut body = v_flex().gap_4();
+
+        body = body.child(
+            h_flex()
+                .gap_3()
+                .child(stat_card(
+                    self.backup_operations.len().to_string(),
+                    "操作分组",
+                    "每次写入按文件分目录".to_string(),
+                    cx,
+                ))
+                .child(stat_card(
+                    self.backup_records.len().to_string(),
+                    "备份记录",
+                    "新 → 旧统一排序".to_string(),
+                    cx,
+                ))
+                .child(stat_card(
+                    human_size(total_bytes),
+                    "备份占用",
+                    "副本文件总大小".to_string(),
+                    cx,
+                ))
+                .child(stat_card(
+                    self.policy_label().replace("冲突策略：", ""),
+                    "同步冲突策略",
+                    self.policy_label().to_string(),
+                    cx,
+                )),
+        );
+
+        // --- 跨包同步 ---
+        let mut sync = card(cx).gap_2();
+        sync = sync.child(section_title("跨整合包同步 · 先生成计划再执行", cx));
+        if self.panels.len() < 2 {
+            sync = sync.child(
+                div()
+                    .text_xs()
+                    .text_color(muted)
+                    .child("跨包同步需要至少两个带配置目录的播放器；当前只检测到一个。"),
+            );
+        } else {
+            let mut src_row = h_flex().flex_wrap().items_center().gap_2();
+            src_row = src_row.child(
+                div()
+                    .w(px(56.))
+                    .flex_none()
+                    .text_xs()
+                    .text_color(muted)
+                    .child("源"),
+            );
+            for (idx, panel) in self.panels.iter().enumerate() {
+                src_row = src_row.child(
+                    chip(
+                        SharedString::from(format!("sync-src-{idx}")),
+                        panel.name.clone(),
+                        idx == self.sync_src,
+                        cx,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| this.set_sync_src(idx, cx))),
+                );
+            }
+            let mut dst_row = h_flex().flex_wrap().items_center().gap_2();
+            dst_row = dst_row.child(
+                div()
+                    .w(px(56.))
+                    .flex_none()
+                    .text_xs()
+                    .text_color(muted)
+                    .child("目标"),
+            );
+            for (idx, panel) in self.panels.iter().enumerate() {
+                dst_row = dst_row.child(
+                    chip(
+                        SharedString::from(format!("sync-dst-{idx}")),
+                        panel.name.clone(),
+                        idx == self.sync_dst,
+                        cx,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| this.set_sync_dst(idx, cx))),
+                );
+            }
+            sync = sync.child(src_row).child(dst_row);
+
+            let script_names: Vec<String> = self
+                .panels
+                .get(self.sync_src)
+                .map(|panel| panel.scripts.iter().map(|s| s.name.clone()).collect())
+                .unwrap_or_default();
+            let mut script_row = h_flex().flex_wrap().items_center().gap_2();
+            script_row = script_row.child(
+                div()
+                    .w(px(56.))
+                    .flex_none()
+                    .text_xs()
+                    .text_color(muted)
+                    .child("脚本"),
+            );
+            if script_names.is_empty() {
+                script_row = script_row.child(
+                    div()
+                        .text_xs()
+                        .text_color(muted)
+                        .child("源播放器没有可同步的脚本"),
+                );
+            }
+            for name in script_names {
+                let selected = self.sync_script_name.as_deref() == Some(name.as_str());
+                let captured = name.clone();
+                script_row =
+                    script_row.child(
+                        chip(
+                            SharedString::from(format!("sync-script-{name}")),
+                            name,
+                            selected,
+                            cx,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.set_sync_script(captured.clone(), cx)
+                        })),
+                    );
+            }
+            sync = sync.child(script_row);
+
+            sync = sync.child(
+                h_flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .pt_2()
+                    .child(
+                        Button::new("sync-policy")
+                            .label(self.policy_label())
+                            .with_size(Size::XSmall)
+                            .on_click(cx.listener(|this, _, _, cx| this.cycle_policy(cx))),
+                    )
+                    .child(
+                        Button::new("sync-plan")
+                            .label("生成同步计划")
+                            .with_size(Size::XSmall)
+                            .on_click(cx.listener(|this, _, _, cx| this.build_sync_plan(cx))),
+                    ),
+            );
+
+            if let Some(plan) = &self.sync_plan {
+                sync = sync.child(
+                    h_flex()
+                        .flex_wrap()
+                        .gap_2()
+                        .child(badge(format!("{} 文件", plan.entries.len()), fg, secondary))
+                        .child(badge(
+                            format!("新增 {}", plan.count(SyncKind::New)),
+                            success,
+                            secondary,
+                        ))
+                        .child(badge(
+                            format!("一致 {}", plan.count(SyncKind::Identical)),
+                            muted,
+                            secondary,
+                        ))
+                        .child(badge(
+                            format!("冲突 {}", plan.count(SyncKind::Conflict)),
+                            warning,
+                            secondary,
+                        )),
+                );
+                for entry in plan.entries.iter().take(10) {
+                    let label = match entry.kind {
+                        SyncKind::New => "新增",
+                        SyncKind::Identical => "一致",
+                        SyncKind::Conflict => "冲突",
+                    };
+                    let color = match entry.kind {
+                        SyncKind::New => success,
+                        SyncKind::Identical => muted,
+                        SyncKind::Conflict => warning,
+                    };
+                    sync = sync.child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(
+                                div()
+                                    .w(px(32.))
+                                    .flex_none()
+                                    .text_xs()
+                                    .text_color(color)
+                                    .child(label),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(fg)
+                                    .child(entry.relative.display().to_string()),
+                            ),
+                    );
+                }
+                if plan.entries.len() > 10 {
+                    sync = sync.child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(format!("…还有 {} 个文件", plan.entries.len() - 10)),
+                    );
+                }
+                sync = sync.child(
+                    Button::new("sync-execute")
+                        .label("执行同步（覆盖前自动备份）")
+                        .primary()
+                        .with_size(Size::Small)
+                        .on_click(cx.listener(|this, _, _, cx| this.execute_sync_plan(cx))),
+                );
+            } else {
+                sync = sync.child(
+                    div()
+                        .text_xs()
+                        .text_color(muted)
+                        .child("尚未生成计划。执行前会列出新增 / 一致 / 冲突的文件，避免盲写。"),
+                );
+            }
+        }
+        body = body.child(sync);
+
+        // --- 备份记录 ---
+        let total = self.backup_records.len();
+        let shown = if self.backup_all {
+            total
+        } else {
+            total.min(10)
+        };
+        let mut records = card(cx).gap_2();
+        records = records.child(
+            h_flex()
+                .items_center()
+                .gap_2()
+                .child(section_title(format!("备份记录 · {total} 条",), cx))
+                .child(div().flex_1())
+                .child(
+                    Button::new("backup-refresh")
+                        .label("刷新")
+                        .with_size(Size::XSmall)
+                        .on_click(cx.listener(|this, _, _, cx| this.refresh_backups(cx))),
+                ),
+        );
+        if total == 0 {
+            records = records.child(
+                div()
+                    .text_xs()
+                    .text_color(muted)
+                    .child("还没有备份记录。任何写入（配置编辑、滤镜切换、皮肤应用、同步覆盖）都会先在这里留一份副本。"),
+            );
+        }
+        for (idx, record) in self.backup_records.iter().take(shown).enumerate() {
+            let size = record
+                .backup_size()
+                .map(human_size)
+                .unwrap_or_else(|| "—".to_string());
+            records = records.child(
+                h_flex()
+                    .items_center()
+                    .gap_2()
+                    .py_1()
+                    .child(badge(record.operation.clone(), primary, secondary))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_xs()
+                            .text_color(fg)
+                            .child(record.original_path.display().to_string()),
+                    )
+                    .child(
+                        div()
+                            .w(px(72.))
+                            .flex_none()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(record.age_label()),
+                    )
+                    .child(
+                        div()
+                            .w(px(72.))
+                            .flex_none()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(size),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("backup-restore-{idx}")))
+                            .label("恢复")
+                            .with_size(Size::XSmall)
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| this.restore_backup(idx, cx)),
+                            ),
+                    ),
+            );
+        }
+        if total > shown {
+            records = records.child(
+                Button::new("backup-expand")
+                    .label(format!("展开全部 {total}"))
+                    .with_size(Size::XSmall)
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_backup_all(cx))),
+            );
+        } else if self.backup_all && total > 10 {
+            records = records.child(
+                Button::new("backup-collapse")
+                    .label("收起")
+                    .with_size(Size::XSmall)
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_backup_all(cx))),
+            );
+        }
+        body = body.child(records);
+
+        body = body.child(
+            card(cx).gap_1().child(
+                div()
+                    .text_xs()
+                    .text_color(muted)
+                    .child("目录布局：backups/<操作>/<时间戳>/<文件名>，同目录 .neve-orig 记录原始绝对路径。恢复也是一次写入：会先把当前状态另存一份，保证恢复本身仍可撤回。"),
+            ),
+        );
+        body.into_any_element()
     }
 }
 
@@ -3382,6 +5042,50 @@ fn setting_row(
         .child(control)
 }
 
+/// 四个新页面共用的可选胶囊：返回 `Stateful<Div>`，调用方再挂 `.on_click`。
+fn chip(
+    id: SharedString,
+    label: impl Into<SharedString>,
+    selected: bool,
+    cx: &App,
+) -> gpui_kit::Stateful<Div> {
+    let t = cx.theme();
+    h_flex()
+        .id(ElementId::Name(id))
+        .h(px(24.))
+        .px_2()
+        .items_center()
+        .flex_none()
+        .rounded(px(6.))
+        .text_xs()
+        .bg(if selected {
+            t.colors.primary
+        } else {
+            t.colors.secondary
+        })
+        .text_color(if selected {
+            t.colors.primary_foreground
+        } else {
+            t.colors.foreground
+        })
+        .cursor_pointer()
+        .child(label.into())
+}
+
+/// 备份记录的人可读体积。
+fn human_size(bytes: u64) -> String {
+    const KB: f64 = 1024.;
+    const MB: f64 = KB * KB;
+    let value = bytes as f64;
+    if value >= MB {
+        format!("{:.1} MB", value / MB)
+    } else if value >= KB {
+        format!("{:.1} KB", value / KB)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
 /// 分段控件的一个按钮。
 fn seg_button(
     id: SharedString,
@@ -3420,10 +5124,13 @@ impl Render for AppShell {
         let content = match self.page {
             Page::Overview => self.render_overview(cx),
             Page::Players => self.render_players(cx),
+            Page::Scripts => self.render_scripts(cx),
+            Page::Filters => self.render_filters(cx),
+            Page::Skins => self.render_skins(cx),
             Page::Configs => self.render_configs(cx),
+            Page::Backup => self.render_backup(cx),
             Page::Settings => self.render_settings(cx),
             Page::GlassLab => self.render_glass_lab(cx),
-            _ => self.render_pending(cx),
         };
         let top_bar = self.render_title_bar(window, cx);
         let header = self.render_page_header(cx);

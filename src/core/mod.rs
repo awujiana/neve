@@ -3,7 +3,9 @@
 pub mod appearance;
 pub mod backup;
 pub mod config;
+pub mod filters;
 pub mod players;
 pub mod scripts;
+pub mod skins;
 pub mod store;
 pub mod sync;
