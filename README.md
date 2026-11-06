@@ -234,6 +234,18 @@ cargo test
 - 相关日志
 - 截图或录屏
 
+## 🏷 关联标签
+
+<p align="center">
+  <a href="https://github.com/topics/mpv"><img alt="mpv" src="https://img.shields.io/badge/mpv-1f6feb?style=flat-square"></a>
+  <a href="https://github.com/topics/rust"><img alt="rust" src="https://img.shields.io/badge/rust-1f6feb?style=flat-square"></a>
+  <a href="https://github.com/topics/media-player"><img alt="media-player" src="https://img.shields.io/badge/media--player-1f6feb?style=flat-square"></a>
+  <a href="https://github.com/topics/desktop-app"><img alt="desktop-app" src="https://img.shields.io/badge/desktop--app-1f6feb?style=flat-square"></a>
+  <a href="https://github.com/topics/neve"><img alt="neve" src="https://img.shields.io/badge/neve-1f6feb?style=flat-square"></a>
+</p>
+
+> 以上为本仓库的 GitHub Topics（关联标签）；可在仓库首页 Topics 区或 `gh repo edit awujiana/neve --add-topic "..."` 维护。
+
 ## 🔗 关联仓库
 
 - [awujiana/neve](https://github.com/awujiana/neve) — 本仓库（当前私有，待可用版本后公开）
